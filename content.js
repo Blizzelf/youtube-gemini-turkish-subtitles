@@ -1,20 +1,20 @@
-// Content script: youtube.com üzerinde çalışır, yalnızca /watch sayfalarında aktifleşir.
-// Videonun orijinal altyazısını [{ start, duration, text }] dizisi olarak çıkarır.
+// Content script: runs on youtube.com and only becomes active on /watch pages.
+// Extracts the video's original captions as a [{ start, duration, text }] array.
 //
-// Akış:
-// 1. captionTracks: oynatıcıdan (page-bridge.js), olmazsa sayfa kaynağındaki
-//    ytInitialPlayerResponse objesinden okunur.
-// 2. Orijinal dil izi seçilir ve json3 formatında indirilir. Otomatik altyazı
-//    cümlelere göre yeniden bölünür (segmenter.js).
-// 3. YouTube boş yanıt dönerse (PO token gerekli), oynatıcının kendi timedtext
-//    isteğindeki token parametreleri kullanılır. Token yoksa oynatıcıda altyazı
-//    kısa süreliğine açılarak token'lı istek tetiklenir.
+// Flow:
+// 1. captionTracks: read from the player (page-bridge.js), or failing that from the
+//    ytInitialPlayerResponse object in the page source.
+// 2. The original-language track is chosen and downloaded as json3. Auto-generated captions
+//    are re-segmented into sentences (segmenter.js).
+// 3. If YouTube returns an empty response (PO token required), the token parameters from
+//    the player's own timedtext request are used. If there is no token yet, captions are
+//    briefly turned on in the player to trigger a request that carries one.
+// 4. The captions are sent to the background. If the translation is not cached, Gemini
+//    translates it chunk by chunk; each chunk (TRANSLATION_CHUNK) is shown as soon as it arrives.
 //
-// 4. Altyazı background'a gönderilir. Çeviri önbellekte yoksa Gemini ile parça parça
-//    çevrilir; her parça (TRANSLATION_CHUNK) gelir gelmez ekranda gösterilir.
-//
-// YouTube bir SPA olduğu için URL ve DOM değişimleri ayrıca izlenir.
-// Bu script API anahtarına erişmez; tüm Gemini işleri background üzerinden yürür.
+// YouTube is a SPA, so URL and DOM changes are watched separately.
+// This script never touches the API key; all Gemini work happens in the background.
+// Strings shown to the user (overlay) are Turkish; log messages are English.
 
 (() => {
   if (window.__ytCeviriLoaded) return;
@@ -24,15 +24,15 @@
   const BRIDGE_SOURCE = "yt-ceviri-bridge";
   const CONTENT_SOURCE = "yt-ceviri-content";
   const BRIDGE_TIMEOUT_MS = 10000;
-  const TOKEN_TIMEOUT_MS = 8000; // Tetiklemeden sonra token'lı isteğin gelmesi için süre
-  // page-bridge.js ile aynı: reklamın bitmesini bekleme sınırı ve token için tetikleme denemeleri.
+  const TOKEN_TIMEOUT_MS = 8000; // Time for the token-bearing request to arrive after a trigger
+  // Same as page-bridge.js: limit for waiting out an ad, and trigger attempts for the token.
   const TRIGGER_TIMEOUT_MS = 5 * 60 * 1000;
   const TRIGGER_ATTEMPTS = 6;
   const TRIGGER_ATTEMPT_MS = 2500;
   const TRIGGER_TOTAL_MS = TRIGGER_TIMEOUT_MS + TRIGGER_ATTEMPTS * TRIGGER_ATTEMPT_MS;
   const NAVIGATION_CHECK_DELAY_MS = 300;
   const CACHE_LIMIT = 20;
-  // Token'lı URL'den kopyalanmayacak, ize özel parametreler.
+  // Track-specific parameters that are not copied from the token-bearing URL.
   const TRACK_PARAMS = new Set(["lang", "kind", "tlang", "fmt", "name"]);
 
   let lastVideoId = null;
@@ -44,15 +44,15 @@
   const pendingRequests = new Map(); // id -> { resolve, timer }
   const tokenParamsByVideo = new Map(); // videoId -> URLSearchParams
   const tokenWaiters = new Map(); // videoId -> [resolve]
-  const captionCache = new Map(); // videoId -> sonuç
+  const captionCache = new Map(); // videoId -> result
 
-  // Token alınamadığında nedeniyle birlikte fırlatılır; CC açılınca tekrar denenir.
+  // Thrown with the reason when no token could be obtained; retried when CC is turned on.
   class TokenError extends Error {}
 
-  // Oynatıcı üstündeki Türkçe altyazı ve TR düğmesi (overlay.js).
+  // Turkish subtitles over the player and the TR button (overlay.js).
   const overlay = new SubtitleOverlay();
 
-  // --- Köprü (page-bridge.js) ile iletişim ---
+  // --- Communication with the bridge (page-bridge.js) ---
 
   function requestBridge(type, payload = {}, timeoutMs = BRIDGE_TIMEOUT_MS) {
     return new Promise((resolve) => {
@@ -82,7 +82,7 @@
     pending.resolve(message.data ?? null);
   });
 
-  // --- PO token yönetimi ---
+  // --- PO token handling ---
 
   function handleTimedtextUrl(rawUrl) {
     let url;
@@ -92,11 +92,12 @@
       return;
     }
 
-    // Video yeni başladığında oynatıcı token üretilmeden (pot olmadan) istek yapabilir; yok sayılır.
+    // Right after a video starts, the player may send a request before the token exists
+    // (no pot); such requests are ignored.
     const videoId = url.searchParams.get("v");
     if (!videoId || !url.searchParams.has("pot")) return;
 
-    // Token tek başına yetmez; c, cver, cplayer gibi istemci parametreleri de gerekir.
+    // The token alone is not enough; client parameters such as c, cver and cplayer are needed too.
     const params = new URLSearchParams();
     for (const [key, value] of url.searchParams) {
       if (!TRACK_PARAMS.has(key)) params.set(key, value);
@@ -109,7 +110,7 @@
       waiters.forEach((resolve) => resolve(params));
     }
 
-    // Daha önce token yüzünden başarısız olduysa (ör. kullanıcı CC'yi şimdi açtı) tekrar dene.
+    // If an earlier attempt failed for lack of a token (e.g. the user just turned on CC), retry.
     if (videoId === tokenRetryVideoId && videoId === lastVideoId) {
       tokenRetryVideoId = null;
       processVideo(videoId);
@@ -131,9 +132,9 @@
     });
   }
 
-  // --- captionTracks okuma ---
+  // --- Reading captionTracks ---
 
-  // Metindeki "marker"dan sonraki ilk JSON objesini, string içindeki parantezleri atlayarak çıkarır.
+  // Extracts the first JSON object after "marker", skipping braces inside strings.
   function extractJsonObject(text, marker) {
     const markerIndex = text.indexOf(marker);
     if (markerIndex === -1) return null;
@@ -166,8 +167,8 @@
       kind: track.kind === "asr" ? "asr" : "manual",
       name: track.name?.simpleText || track.name?.runs?.map((run) => run.text).join("") || track.languageCode,
     }));
-    // Çok sesli (yapay zekâ ile seslendirilmiş) videolarda varsayılan ses izi orijinal dildir,
-    // ör. audioTrackId "en-US.4". Tek sesli videolarda audioTrackId yoktur.
+    // In multi-audio (AI-dubbed) videos the default audio track is the original language,
+    // e.g. audioTrackId "en-US.4". Single-audio videos have no audioTrackId.
     const audioTrack = renderer?.audioTracks?.[renderer.defaultAudioTrackIndex ?? 0];
 
     return {
@@ -182,12 +183,12 @@
   async function getCaptionInfo(videoId) {
     const fromPlayer = await requestBridge("GET_PLAYER_RESPONSE", { videoId });
     if (fromPlayer) {
-      // Bu script yüklenmeden önce oynatıcının yaptığı token'lı istek.
+      // Token-bearing request the player made before this script loaded.
       if (fromPlayer.timedtextUrl) handleTimedtextUrl(fromPlayer.timedtextUrl);
       return normalizeCaptionInfo(fromPlayer);
     }
 
-    console.warn(`${LOG_PREFIX} Oynatıcıdan okunamadı, sayfa kaynağı deneniyor.`);
+    console.warn(`${LOG_PREFIX} Could not read from the player, trying the page source.`);
     const response = await fetch(`/watch?v=${encodeURIComponent(videoId)}`, { credentials: "include" });
     const playerResponse = extractJsonObject(await response.text(), "ytInitialPlayerResponse = ");
     if (playerResponse?.videoDetails?.videoId !== videoId) {
@@ -196,9 +197,10 @@
     return normalizeCaptionInfo(playerResponse);
   }
 
-  // Orijinal dil sırasıyla: orijinal ses izinin dili, varsayılan otomatik (asr) iz, ilk asr iz.
-  // Seslendirilmiş videolarda her ses dili için ayrı asr iz olduğundan ilk asr iz yanıltıcı olabilir.
-  // O dilde elle yazılmış altyazı varsa otomatik olana tercih edilir.
+  // Original language, in order: the original audio track's language, the default
+  // auto-generated (asr) track, the first asr track. Dubbed videos have one asr track per
+  // audio language, so the first asr track can be misleading. A manual track in that
+  // language is preferred over the auto-generated one.
   function pickOriginalTrack({ tracks, defaultTrackIndex, originalLanguage }) {
     if (!tracks.length) return null;
 
@@ -221,7 +223,8 @@
     return defaultTrack || tracks[0];
   }
 
-  // --- Altyazı indirme ---
+  // --- Downloading captions ---
+  // Error texts here can end up in the overlay, so they stay Turkish.
 
   function buildTimedtextUrl(baseUrl, tokenParams) {
     const url = new URL(baseUrl, location.origin);
@@ -244,11 +247,11 @@
     return text.trim() ? text : null;
   }
 
-  // Oynatıcı altyazıyı kendisi çekerse token kendiliğinden gelir. Gelmezse köprü,
-  // reklam bittikten sonra oynatıcıda altyazıyı açarak token'lı isteği tetikler.
-  // Token alınamazsa nedeni TokenError ile bildirilir.
+  // If the player fetches captions on its own, the token arrives by itself. Otherwise the
+  // bridge turns captions on in the player (after any ad) to trigger a token-bearing request.
+  // If no token can be obtained, the reason is reported with a TokenError.
   async function obtainToken(videoId, languageCode) {
-    console.log(`${LOG_PREFIX} PO token gerekiyor; altyazı tetiklenecek (reklam varsa bittikten sonra)…`);
+    console.log(`${LOG_PREFIX} PO token required; triggering captions (after the ad, if any)…`);
 
     const tokenArrived = waitForToken(videoId, TRIGGER_TOTAL_MS + TOKEN_TIMEOUT_MS);
     const trigger = await Promise.race([
@@ -274,34 +277,34 @@
   }
 
   async function downloadCaptions(videoId, track) {
-    // 1) Doğrudan dene (token istemeyen videolar için).
+    // 1) Try directly (for videos that do not require a token).
     const direct = await fetchTimedtext(buildTimedtextUrl(track.baseUrl));
     if (direct) return direct;
 
-    // 2) Oynatıcıdan yakalanan token ile dene.
+    // 2) Try with the token captured from the player.
     const tokenParams = tokenParamsByVideo.get(videoId) || (await obtainToken(videoId, track.languageCode));
     const body = await fetchTimedtext(buildTimedtextUrl(track.baseUrl, tokenParams));
     if (!body) {
-      // Token süresi dolmuş olabilir; bir sonraki denemede yenisi alınsın.
+      // The token may have expired; get a fresh one on the next attempt.
       tokenParamsByVideo.delete(videoId);
       throw new TokenError("token'lı istek de boş döndü");
     }
     return body;
   }
 
-  // --- json3 ayrıştırma ---
+  // --- json3 parsing ---
 
   const toSeconds = (ms) => Math.round(ms) / 1000;
 
-  // Elle yazılmış altyazı: her olay zaten bir altyazı satırıdır.
-  // Otomatik (asr) altyazı ise segmenter.js ile cümlelere göre yeniden bölünür.
+  // Manual captions: every event is already one caption line.
+  // Auto-generated (asr) captions are re-segmented into sentences by segmenter.js.
   function parseJson3(text, kind) {
     const data = JSON.parse(text);
     if (kind === "asr") return buildAsrCues(data);
 
     const cues = [];
     for (const event of data.events || []) {
-      // segs olmayan olaylar pencere tanımıdır; aAppend olayları yalnızca satır sonu içerir.
+      // Events without segs define windows; aAppend events contain only a line break.
       if (!event.segs) continue;
       const line = event.segs.map((seg) => seg.utf8 || "").join("").replace(/\s+/g, " ").trim();
       if (!line) continue;
@@ -315,7 +318,7 @@
     return cues;
   }
 
-  // --- Sonuç ---
+  // --- Results ---
 
   function cacheResult(result) {
     captionCache.set(result.videoId, result);
@@ -324,14 +327,14 @@
     }
   }
 
-  // Sayfa konsolundan erişim için: ytCeviri.captions, ytCeviri.translated
+  // For access from the page console: ytCeviri.captions, ytCeviri.translated
   function exposeResult(result) {
     window.postMessage({ source: CONTENT_SOURCE, type: "EXPOSE_CAPTIONS", result }, location.origin);
   }
 
   function report(result) {
     console.log(
-      `${LOG_PREFIX} Altyazı hazır: "${result.title}" (${result.trackName}, ${result.language}, ${result.kind}) — ${result.captions.length} satır`
+      `${LOG_PREFIX} Captions ready: "${result.title}" (${result.trackName}, ${result.language}, ${result.kind}) — ${result.captions.length} lines`
     );
     console.log(`${LOG_PREFIX} JSON:`, result.captions);
     console.table(result.captions.slice(0, 15));
@@ -339,20 +342,20 @@
   }
 
   function reportTranslation(result) {
-    console.log(`${LOG_PREFIX} Türkçe çeviri hazır: ${result.translated.length} satır`);
-    console.log(`${LOG_PREFIX} Çeviri JSON:`, result.translated);
+    console.log(`${LOG_PREFIX} Turkish translation ready: ${result.translated.length} lines`);
+    console.log(`${LOG_PREFIX} Translation JSON:`, result.translated);
     console.table(result.translated.slice(0, 15));
     exposeResult(result);
     overlay.setCues(result.translated);
     overlay.setStatus("ready", "Türkçe altyazı");
   }
 
-  // --- Çeviri (background + Gemini) ---
+  // --- Translation (background + Gemini) ---
 
   const isCurrent = (videoId) => videoId === lastVideoId;
 
-  // Background yalnızca çevrilmiş metinleri gönderir (orijinal sırayla, henüz çevrilmeyenler null).
-  // Zaman damgaları her zaman content script'teki orijinal altyazıdan alınır.
+  // The background sends only translated texts (in original order, null where not yet
+  // translated). Timestamps always come from the original captions held by the content script.
   function applyTranslatedTexts(result, startIndex, texts) {
     if (!Array.isArray(texts)) return;
     result.translatedTexts ??= new Array(result.captions.length).fill(null);
@@ -372,7 +375,7 @@
     return cues;
   }
 
-  // Hazır olan parçalar çeviri bitmeden ekranda gösterilir.
+  // Finished chunks are shown before the whole translation is done.
   function showPartialTranslation(result, statusText) {
     if (!isCurrent(result.videoId) || result.translated) return;
     overlay.setCues(translatedCues(result));
@@ -390,7 +393,7 @@
       return;
     }
     if (result.language.split("-")[0] === "tr") {
-      console.log(`${LOG_PREFIX} Altyazı zaten Türkçe, çeviri atlandı.`);
+      console.log(`${LOG_PREFIX} Captions are already Turkish; translation skipped.`);
       overlay.setCues(result.captions);
       overlay.setStatus("ready", "Türkçe altyazı");
       return;
@@ -403,14 +406,14 @@
         title: result.title,
         language: result.language,
         captions: result.captions,
-        // Oynatma konumundaki parça önce çevrilir (ör. &t=1219s ile açılan video).
+        // The chunk at the playback position is translated first (e.g. a video opened with &t=1219s).
         currentTime: overlay.currentTime(),
       });
       applyTranslatedTexts(result, 0, response?.texts);
 
       if (!response?.ok) {
         const error = response?.error || "bilinmeyen hata";
-        console.warn(`${LOG_PREFIX} Çeviri başlatılamadı: ${error}`);
+        console.warn(`${LOG_PREFIX} Translation could not start: ${error}`);
         if (isCurrent(result.videoId)) {
           overlay.setCues(translatedCues(result));
           overlay.setStatus("error", `Çeviri başlatılamadı: ${error}`);
@@ -419,23 +422,23 @@
       }
 
       if (response.status === "cached") {
-        console.log(`${LOG_PREFIX} Çeviri önbellekten yüklendi (${result.captions.length} satır).`);
+        console.log(`${LOG_PREFIX} Translation loaded from cache (${result.captions.length} lines).`);
         completeTranslation(result);
         return;
       }
 
-      const state = { started: "başladı", resumed: "kaldığı yerden sürüyor", pending: "zaten sürüyor" }[response.status];
+      const state = { started: "started", resumed: "resumed", pending: "already running" }[response.status];
       console.log(
-        `${LOG_PREFIX} Çeviri ${state} (${result.captions.length} satır, ${response.done}/${response.total} parça hazır)…`
+        `${LOG_PREFIX} Translation ${state} (${result.captions.length} lines, ${response.done}/${response.total} chunks ready)…`
       );
       showPartialTranslation(result, `Türkçe altyazı hazırlanıyor… (${response.done}/${response.total})`);
     } catch (error) {
-      console.warn(`${LOG_PREFIX} Background'a ulaşılamadı:`, error?.message || error);
+      console.warn(`${LOG_PREFIX} Could not reach the background:`, error?.message || error);
       if (isCurrent(result.videoId)) overlay.setStatus("error", "Eklentiye ulaşılamadı; sayfayı yenileyin.");
     }
   }
 
-  // Çeviri sürerken ileri/geri sarılırsa o konumdaki parça öne alınır.
+  // If the user seeks while translating, the chunk at that position moves to the front.
   overlay.onSeek = (time) => {
     const result = captionCache.get(lastVideoId);
     if (!result || result.translated || result.language.split("-")[0] === "tr") return;
@@ -443,13 +446,13 @@
   };
 
   chrome.runtime.onMessage.addListener((message) => {
-    // Kullanıcı başka videoya geçtiyse sonuç önbellekte kalır, geri dönünce gösterilir.
+    // If the user moved to another video, the result stays cached and is shown on return.
     const result = captionCache.get(message?.videoId);
 
     switch (message?.type) {
       case "TRANSLATION_CHUNK":
         if (!result) return;
-        console.log(`${LOG_PREFIX} Çeviri ilerlemesi: ${message.done}/${message.total} parça`);
+        console.log(`${LOG_PREFIX} Translation progress: ${message.done}/${message.total} chunks`);
         applyTranslatedTexts(result, message.startIndex, message.texts);
         showPartialTranslation(result, `Türkçe altyazı hazırlanıyor… (${message.done}/${message.total})`);
         break;
@@ -466,8 +469,8 @@
         break;
 
       case "TRANSLATION_ERROR":
-        console.error(`${LOG_PREFIX} Çeviri başarısız (${message.videoId}): ${message.error}`);
-        // Hazır olan parçalar ekranda kalır.
+        console.error(`${LOG_PREFIX} Translation failed (${message.videoId}): ${message.error}`);
+        // Finished chunks stay on screen.
         if (isCurrent(message.videoId)) overlay.setStatus("error", `Çeviri başarısız: ${message.error}`);
         break;
     }
@@ -477,8 +480,8 @@
     try {
       await chrome.runtime.sendMessage({ type: "CONTENT_READY", videoId });
     } catch (error) {
-      // Eklenti yeniden yüklendiğinde eski content script'in bağlantısı kopar.
-      console.warn(`${LOG_PREFIX} Background'a ulaşılamadı:`, error?.message || error);
+      // When the extension is reloaded, the old content script loses its connection.
+      console.warn(`${LOG_PREFIX} Could not reach the background:`, error?.message || error);
     }
   }
 
@@ -500,7 +503,7 @@
 
       const track = pickOriginalTrack(info);
       if (!track) {
-        console.log(`${LOG_PREFIX} Bu videoda altyazı yok: ${videoId}`);
+        console.log(`${LOG_PREFIX} This video has no captions: ${videoId}`);
         overlay.setStatus("idle", "Bu videoda altyazı yok");
         return;
       }
@@ -524,23 +527,23 @@
       if (error instanceof TokenError) {
         tokenRetryVideoId = videoId;
         console.warn(
-          `${LOG_PREFIX} Altyazı indirilemedi: ${error.message}. CC açılınca otomatik tekrar denenecek. (videoId=${videoId})`
+          `${LOG_PREFIX} Captions could not be downloaded: ${error.message}. Will retry automatically when CC is turned on. (videoId=${videoId})`
         );
         overlay.setStatus("error", `Altyazı alınamadı: ${error.message}. CC'yi açınca tekrar denenecek.`);
         return;
       }
-      console.error(`${LOG_PREFIX} Altyazı alınamadı:`, error);
+      console.error(`${LOG_PREFIX} Captions could not be loaded:`, error);
       overlay.setStatus("error", `Altyazı alınamadı: ${error.message}`);
     }
   }
 
-  // --- SPA gezinme takibi ---
+  // --- SPA navigation tracking ---
 
   function checkPage() {
     if (location.pathname !== "/watch") {
       if (lastVideoId) overlay.clear();
       lastVideoId = null;
-      runId++; // Devam eden işlemi iptal et.
+      runId++; // Cancel the run in progress.
       return;
     }
 
@@ -551,12 +554,12 @@
     tokenRetryVideoId = null;
     overlay.clear();
     overlay.attach();
-    console.log(`${LOG_PREFIX} İzleme sayfası algılandı: ${videoId}`);
+    console.log(`${LOG_PREFIX} Watch page detected: ${videoId}`);
     notifyBackground(videoId);
     processVideo(videoId);
   }
 
-  // Art arda gelen olayları birleştirir; sürekli DOM değişiminde bile en geç gecikme kadar sonra çalışır.
+  // Coalesces bursts of events; even under constant DOM changes it runs within the delay.
   function scheduleCheck() {
     if (checkTimer) return;
     checkTimer = setTimeout(() => {
@@ -565,12 +568,12 @@
     }, NAVIGATION_CHECK_DELAY_MS);
   }
 
-  // YouTube'un kendi gezinme olayları.
+  // YouTube's own navigation events.
   document.addEventListener("yt-navigate-finish", scheduleCheck);
   document.addEventListener("yt-page-data-updated", scheduleCheck);
-  // Geri/ileri tuşları.
+  // Back/forward buttons.
   window.addEventListener("popstate", scheduleCheck);
-  // Yedek: başlık her video geçişinde değişir; olaylar kaçarsa DOM değişimi yakalar.
+  // Fallback: the title changes on every video switch; catches DOM changes if events are missed.
   new MutationObserver(scheduleCheck).observe(document.head, {
     childList: true,
     subtree: true,

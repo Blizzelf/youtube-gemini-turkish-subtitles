@@ -1,9 +1,9 @@
-/* YouTube Çeviri: oynatıcı üstündeki Türkçe altyazı ve kontrol düğmesi */
+/* YouTube Çeviri: Turkish subtitles over the player and the control-bar button */
 
 .yt-ceviri-overlay {
   position: absolute;
   left: 50%;
-  /* Kontroller görünürken ilerleme çubuğunun üstü (overlay.js ölçer). */
+  /* While the controls are visible: just above the progress bar (measured by overlay.js). */
   bottom: var(--yt-ceviri-controls-offset, 70px);
   z-index: 41;
   width: max-content;
@@ -14,12 +14,12 @@
   transition: bottom 0.2s ease;
 }
 
-/* Kontroller gizliyken altyazı aşağı iner. */
+/* The subtitles move down while the controls are hidden. */
 #movie_player.ytp-autohide .yt-ceviri-overlay {
   bottom: 6%;
 }
 
-/* Reklam sırasında video zamanı reklama aittir; altyazı gösterilmez. */
+/* During an ad the video time belongs to the ad; no subtitles are shown. */
 #movie_player.ad-showing .yt-ceviri-overlay,
 .yt-ceviri-overlay[hidden] {
   display: none;
@@ -39,12 +39,12 @@
   box-decoration-break: clone;
 }
 
-/* Overlay açıkken YouTube'un kendi altyazısı üst üste binmesin. */
+/* Keep YouTube's own captions from overlapping while the overlay is on. */
 #movie_player.yt-ceviri-on .ytp-caption-window-container {
   display: none !important;
 }
 
-/* Düğme kuralları #movie_player ile başlar; YouTube'un .ytp-button stillerini geçmek için. */
+/* Button rules start with #movie_player to override YouTube's .ytp-button styles. */
 #movie_player .yt-ceviri-button {
   position: relative;
   color: #fff;
@@ -59,7 +59,7 @@
   display: none;
 }
 
-/* Açıkken altta kırmızı çizgi; yeni YouTube arayüzü ::after'ı varsayılan olarak gizler. */
+/* Red underline when on; the new YouTube UI hides ::after by default. */
 #movie_player .yt-ceviri-button[aria-pressed="true"]::after {
   content: "";
   display: block;

@@ -1,12 +1,13 @@
-// Popup: kullanıcının Gemini API anahtarını chrome.storage.local'a kaydeder ve
-// çeviri önbelleğini gösterir/temizler (önbellek background.js'e aittir; mesajla istenir).
-// Kayıtlı anahtar input'a geri yazılmaz; yalnızca maskeli hali gösterilir.
+// Popup: saves the user's Gemini API key to chrome.storage.local and shows, clears, exports
+// and imports the translation cache (the cache belongs to background.js; requested by message).
+// The saved key is never written back into the input; only a masked form is shown.
+// All strings in this file are shown to the user, so they are Turkish.
 
 const STORAGE_KEY = "geminiApiKey";
-const CLEAR_CONFIRM_MS = 4000; // "Emin misiniz?" durumunun süresi
+const CLEAR_CONFIRM_MS = 4000; // How long the "Emin misiniz?" (are you sure?) state lasts
 const IMPORT_MAX_BYTES = 20 * 1024 * 1024;
 
-// İçe aktarma sekmede yapılır: popup'ta dosya seçme penceresi açılınca popup kapanabiliyor.
+// Import happens in a tab: the popup can close when the file picker opens.
 const params = new URLSearchParams(location.search);
 const isTabView = params.get("view") === "tab";
 
@@ -107,7 +108,7 @@ function toggleVisibility() {
   els.toggleBtn.setAttribute("aria-label", hidden ? "Anahtarı gizle" : "Anahtarı göster");
 }
 
-// --- Çeviri önbelleği ---
+// --- Translation cache ---
 
 function formatBytes(bytes) {
   const number = (value) => value.toLocaleString("tr-TR", { maximumFractionDigits: 1 });
@@ -217,7 +218,7 @@ async function importCache() {
   await loadCacheStats();
 }
 
-// İlk tıklama onay ister; geri alınamayan silme ikinci tıklamada yapılır.
+// The first click asks for confirmation; the irreversible delete happens on the second click.
 async function clearCache() {
   if (!clearConfirmTimer) {
     els.clearCacheBtn.classList.add("confirm");

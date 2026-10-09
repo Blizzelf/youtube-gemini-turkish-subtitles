@@ -1,6 +1,6 @@
-// background.js için mock'lu testler: kümeleme, istek kuyruğu, 429 tekrar denemesi, önbellek,
-// dışa/içe aktarma. chrome API'leri ve Gemini taklit edilir; gerçek istek yapılmaz.
-// Çalıştırma: npm test  (ya da node tests/background.test.js)
+// Mocked tests for background.js: batching, request queue, 429 retries, cache, export/import.
+// The chrome APIs and Gemini are faked; no real requests are made.
+// Run: npm test  (or node tests/background.test.js)
 const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
@@ -9,6 +9,7 @@ const assert = require("assert");
 const SOURCE = fs.readFileSync(path.join(__dirname, "..", "background.js"), "utf8");
 const INTERVAL_MS = 40;
 
+// Shortens the timing constants so the tests run in milliseconds.
 function patched({ cacheMaxBytes } = {}) {
   let src = SOURCE.replace("MIN_REQUEST_INTERVAL_MS = 2500", `MIN_REQUEST_INTERVAL_MS = ${INTERVAL_MS}`)
     .replace("BACKOFF_BASE_MS = 4000", "BACKOFF_BASE_MS = 20")
@@ -16,7 +17,7 @@ function patched({ cacheMaxBytes } = {}) {
     .replace("BACKOFF_JITTER_MS = 1000", "BACKOFF_JITTER_MS = 0");
   if (cacheMaxBytes) src = src.replace("CACHE_MAX_BYTES = 8 * 1024 * 1024", `CACHE_MAX_BYTES = ${cacheMaxBytes}`);
   for (const name of ["MIN_REQUEST_INTERVAL_MS", "BACKOFF_BASE_MS", "BACKOFF_JITTER_MS"]) {
-    assert.ok(!src.includes(`${name} = ${{ MIN_REQUEST_INTERVAL_MS: 2500, BACKOFF_BASE_MS: 4000, BACKOFF_JITTER_MS: 1000 }[name]}`), `${name} yamalanmadı`);
+    assert.ok(!src.includes(`${name} = ${{ MIN_REQUEST_INTERVAL_MS: 2500, BACKOFF_BASE_MS: 4000, BACKOFF_JITTER_MS: 1000 }[name]}`), `${name} not patched`);
   }
   return src;
 }
@@ -40,7 +41,8 @@ function makeStorage(initial = {}) {
   };
 }
 
-// Sahte Gemini: gelen satırları "TR " önekiyle geri döner. behavior(callIndex, chunk) özel yanıt verebilir.
+// Fake Gemini: returns the incoming lines prefixed with "TR ". behavior(callIndex, chunk) can
+// return a custom response.
 function makeGemini(behavior = () => null) {
   const state = { calls: [], inFlight: 0, maxInFlight: 0 };
   state.fetch = async (url, init) => {
@@ -96,7 +98,7 @@ async function waitFor(predicate, timeoutMs = 3000) {
     if (predicate()) return;
     await new Promise((r) => setTimeout(r, 5));
   }
-  throw new Error("waitFor zaman aşımı");
+  throw new Error("waitFor timed out");
 }
 
 const cues = (n, { step = 2, text = (i) => `line ${i}` } = {}) =>
@@ -107,7 +109,7 @@ const types = (sent) => sent.map((m) => m.type);
 const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
 
-test("kümeleme: 100 satır -> 40/40/20, sıralı kuyruk ve istekler arası bekleme", async () => {
+test("batching: 100 lines -> 40/40/20, serial queue with a gap between requests", async () => {
   const gemini = makeGemini();
   const { sent, send } = makeContext({ gemini });
   const ack = await send(translate("v1", cues(100)));
@@ -116,15 +118,15 @@ test("kümeleme: 100 satır -> 40/40/20, sıralı kuyruk ve istekler arası bekl
   await waitFor(() => sent.some((m) => m.type === "TRANSLATION_RESULT"));
 
   assert.deepStrictEqual(gemini.calls.map((c) => c.chunk.length), [40, 40, 20]);
-  assert.strictEqual(gemini.maxInFlight, 1, "aynı anda birden fazla istek olmamalı");
+  assert.strictEqual(gemini.maxInFlight, 1, "there must never be more than one request in flight");
   for (let i = 1; i < gemini.calls.length; i++) {
-    assert.ok(gemini.calls[i].at - gemini.calls[i - 1].at >= INTERVAL_MS, `istek aralığı: ${gemini.calls[i].at - gemini.calls[i - 1].at} ms`);
+    assert.ok(gemini.calls[i].at - gemini.calls[i - 1].at >= INTERVAL_MS, `request gap: ${gemini.calls[i].at - gemini.calls[i - 1].at} ms`);
   }
   assert.ok(gemini.calls[0].url.includes("gemini-3.8-flash:generateContent"));
   assert.strictEqual(gemini.calls[0].headers["x-goog-api-key"], "AIzaTESTKEY");
 });
 
-test("kümeleme: uzun satırlar karakter sınırıyla bölünür", async () => {
+test("batching: long lines are split by the character limit", async () => {
   const gemini = makeGemini();
   const { sent, send } = makeContext({ gemini });
   await send(translate("v1", cues(10, { text: (i) => `${i} ${"x".repeat(1000)}` })));
@@ -132,7 +134,7 @@ test("kümeleme: uzun satırlar karakter sınırıyla bölünür", async () => {
   assert.deepStrictEqual(gemini.calls.map((c) => c.chunk.length), [5, 5]);
 });
 
-test("parça parça iletim: CHUNK mesajları sırayla, sonra RESULT; zaman damgaları gönderilmez", async () => {
+test("progressive delivery: CHUNK messages in order, then RESULT; no timestamps sent", async () => {
   const gemini = makeGemini();
   const { sent, send } = makeContext({ gemini });
   await send(translate("v1", cues(100)));
@@ -145,7 +147,7 @@ test("parça parça iletim: CHUNK mesajları sırayla, sonra RESULT; zaman damga
   assert.strictEqual(result.texts[99], "TR line 99");
 });
 
-test("önbellek: aynı video ikinci kez istenince API'ye gidilmez", async () => {
+test("cache: the same video requested again does not call the API", async () => {
   const gemini = makeGemini();
   const { sent, send, storage } = makeContext({ gemini });
   await send(translate("v1", cues(50)));
@@ -159,7 +161,7 @@ test("önbellek: aynı video ikinci kez istenince API'ye gidilmez", async () => 
   assert.strictEqual(gemini.calls.length, callsAfterFirst);
 });
 
-test("önbellek: anahtar olmadan da tamamlanmış çeviri yüklenir", async () => {
+test("cache: a complete translation loads even without an API key", async () => {
   const gemini = makeGemini();
   const storage = makeStorage({ geminiApiKey: "k" });
   const first = makeContext({ gemini, storage });
@@ -171,10 +173,10 @@ test("önbellek: anahtar olmadan da tamamlanmış çeviri yüklenir", async () =
   assert.strictEqual(ack.status, "cached");
   const noCache = await second.send(translate("v2", cues(10)));
   assert.strictEqual(noCache.ok, false);
-  assert.ok(noCache.error.includes("API anahtarı"));
+  assert.ok(noCache.error.includes("API anahtarı")); // Turkish user-facing message
 });
 
-test("önbellek: altyazı değiştiyse eski çeviri kullanılmaz", async () => {
+test("cache: changed captions do not reuse the old translation", async () => {
   const gemini = makeGemini();
   const { sent, send } = makeContext({ gemini });
   await send(translate("v1", cues(10)));
@@ -183,7 +185,7 @@ test("önbellek: altyazı değiştiyse eski çeviri kullanılmaz", async () => {
   assert.strictEqual(ack.status, "started");
 });
 
-test("429: RetryInfo kadar beklenir, STATUS gönderilir, parça tekrar denenir", async () => {
+test("429: waits for RetryInfo, sends STATUS, retries the chunk", async () => {
   const gemini = makeGemini((call) =>
     call === 1
       ? {
@@ -197,24 +199,24 @@ test("429: RetryInfo kadar beklenir, STATUS gönderilir, parça tekrar denenir",
   await send(translate("v1", cues(10)));
   await waitFor(() => sent.some((m) => m.type === "TRANSLATION_RESULT"));
   assert.strictEqual(gemini.calls.length, 2);
-  assert.ok(gemini.calls[1].at - gemini.calls[0].at >= 150, `bekleme: ${gemini.calls[1].at - gemini.calls[0].at} ms`);
+  assert.ok(gemini.calls[1].at - gemini.calls[0].at >= 150, `wait: ${gemini.calls[1].at - gemini.calls[0].at} ms`);
   assert.deepStrictEqual(types(sent), ["TRANSLATION_STATUS", "TRANSLATION_CHUNK", "TRANSLATION_RESULT"]);
   assert.ok(sent[0].message.includes("429"));
 });
 
-test("429: üst üste hatalarda bekleme katlanarak artar", async () => {
+test("429: the delay grows exponentially on repeated errors", async () => {
   const rateLimited = { ok: false, status: 429, json: async () => ({ error: { message: "Too many requests" } }) };
   const gemini = makeGemini((call) => (call <= 3 ? rateLimited : null));
   const { sent, send } = makeContext({ gemini });
   await send(translate("v1", cues(5)));
   await waitFor(() => sent.some((m) => m.type === "TRANSLATION_RESULT"));
   const gaps = gemini.calls.slice(1).map((c, i) => c.at - gemini.calls[i].at);
-  // Taban 20 ms: 20, 40, 80 (kuyruk aralığı 40 ms ile birlikte en az bu kadar)
+  // Base 20 ms: 20, 40, 80 (at least that much, together with the 40 ms queue gap)
   assert.ok(gaps[0] >= 20 && gaps[1] >= 40 && gaps[2] >= 80, gaps.join(","));
   assert.ok(gaps[2] > gaps[0], gaps.join(","));
 });
 
-test("günlük kota: tekrar denenmez, hata mesajı açıklayıcı", async () => {
+test("daily quota: not retried, error message explains it", async () => {
   const gemini = makeGemini(() => ({
     ok: false,
     status: 429,
@@ -229,10 +231,10 @@ test("günlük kota: tekrar denenmez, hata mesajı açıklayıcı", async () => 
   await send(translate("v1", cues(5)));
   await waitFor(() => sent.some((m) => m.type === "TRANSLATION_ERROR"));
   assert.strictEqual(gemini.calls.length, 1);
-  assert.ok(sent.at(-1).error.includes("günlük kotası"));
+  assert.ok(sent.at(-1).error.includes("günlük kotası")); // Turkish user-facing message
 });
 
-test("yarıda kalan çeviri kaydedilir ve kaldığı yerden sürer", async () => {
+test("an interrupted translation is saved and resumes where it stopped", async () => {
   let failSecond = true;
   const gemini = makeGemini((call) =>
     failSecond && call === 2 ? { ok: false, status: 400, json: async () => ({ error: { message: "Bad request" } }) } : null
@@ -258,10 +260,10 @@ test("yarıda kalan çeviri kaydedilir ve kaldığı yerden sürer", async () =>
   assert.strictEqual(storage.data["translation:v1"].complete, true);
 });
 
-test("öncelik: oynatma konumundaki parça önce, sarılınca yeni konum öne alınır", async () => {
+test("priority: the chunk at the playback position goes first; seeking moves the new position up", async () => {
   const gemini = makeGemini();
   const { sent, send } = makeContext({ gemini });
-  // 160 satır, 2 sn arayla: parçalar 0-78 sn, 80-158 sn, 160-238 sn, 240-318 sn
+  // 160 lines, 2 s apart: chunks cover 0-78 s, 80-158 s, 160-238 s, 240-318 s
   await send(translate("v1", cues(160), { currentTime: 100 }));
   await waitFor(() => gemini.calls.length >= 1);
   await send({ type: "TRANSLATION_PRIORITY", videoId: "v1", time: 250 });
@@ -269,7 +271,7 @@ test("öncelik: oynatma konumundaki parça önce, sarılınca yeni konum öne al
   assert.deepStrictEqual(gemini.calls.map((c) => c.chunk[0].start), [80, 240, 0, 160]);
 });
 
-test("aynı video iki sekmeden istenirse tek iş çalışır, iki sekme de sonuç alır", async () => {
+test("the same video requested from two tabs runs one job and both tabs get the result", async () => {
   const gemini = makeGemini();
   const { sent, send } = makeContext({ gemini });
   const [a, b] = await Promise.all([send(translate("v1", cues(50)), 1), send(translate("v1", cues(50)), 2)]);
@@ -278,7 +280,7 @@ test("aynı video iki sekmeden istenirse tek iş çalışır, iki sekme de sonu�
   assert.strictEqual(gemini.calls.length, 2);
 });
 
-test("biçim hatası: eksik satır -> parça bölünür; bozuk zaman damgası -> o satır orijinal kalır", async () => {
+test("format errors: missing line -> chunk is split; broken timestamp -> that line keeps its original", async () => {
   const gemini = makeGemini((call, chunk) => {
     const items = chunk.map((c) => ({ ...c, text: `TR ${c.text}`, start: c.start === 4 ? 999 : c.start }));
     const out = call === 1 ? items.slice(0, -1) : items;
@@ -290,7 +292,7 @@ test("biçim hatası: eksik satır -> parça bölünür; bozuk zaman damgası ->
   assert.deepStrictEqual(sent.at(-1).texts, ["TR line 0", "TR line 1", "line 2", "TR line 3"]);
 });
 
-test("LRU: önbellek bütçesi aşılınca en eski video silinir", async () => {
+test("LRU: the oldest video is removed when the cache budget is exceeded", async () => {
   const gemini = makeGemini();
   const storage = makeStorage({ geminiApiKey: "k" });
   const { sent, send } = makeContext({ gemini, storage, cacheMaxBytes: 800 });
@@ -305,7 +307,7 @@ test("LRU: önbellek bütçesi aşılınca en eski video silinir", async () => {
   assert.deepStrictEqual(Object.keys(storage.data.translationIndex).sort(), kept.map((k) => k.slice(12)));
 });
 
-test("popup: önbellek bilgisi ve temizleme (anahtar ve dizinde olmayan kayıtlar)", async () => {
+test("popup: cache stats and clearing (API key kept, entries missing from the index removed)", async () => {
   const gemini = makeGemini();
   const storage = makeStorage({ geminiApiKey: "k", "translation:orphan": { version: 1 } });
   const { sent, send } = makeContext({ gemini, storage });
@@ -322,9 +324,9 @@ test("popup: önbellek bilgisi ve temizleme (anahtar ve dizinde olmayan kayıtla
 
   const cleared = await send({ type: "CLEAR_TRANSLATION_CACHE" });
   assert.strictEqual(cleared.ok, true);
-  assert.strictEqual(cleared.removed, 3); // a, b ve dizinde olmayan kayıt
+  assert.strictEqual(cleared.removed, 3); // a, b and the entry missing from the index
   assert.strictEqual(cleared.bytes, stats.bytes);
-  assert.deepStrictEqual(Object.keys(storage.data), ["geminiApiKey"]); // API anahtarı silinmez
+  assert.deepStrictEqual(Object.keys(storage.data), ["geminiApiKey"]); // the API key is not removed
 
   assert.strictEqual((await send({ type: "GET_CACHE_STATS" })).count, 0);
   const callsBefore = gemini.calls.length;
@@ -333,7 +335,7 @@ test("popup: önbellek bilgisi ve temizleme (anahtar ve dizinde olmayan kayıtla
   await waitFor(() => gemini.calls.length > callsBefore);
 });
 
-test("dışa/içe aktarma: Chrome'da çevrilen video Edge'de API'ye gitmeden yüklenir", async () => {
+test("export/import: a video translated in Chrome loads in Edge without calling the API", async () => {
   const chromeGemini = makeGemini();
   const chromeSide = makeContext({ gemini: chromeGemini });
   for (const id of ["videoAAAAAA1", "videoBBBBBB2"]) {
@@ -344,10 +346,10 @@ test("dışa/içe aktarma: Chrome'da çevrilen video Edge'de API'ye gitmeden yü
   const exported = await chromeSide.send({ type: "EXPORT_TRANSLATION_CACHE" });
   assert.strictEqual(exported.count, 2);
   assert.strictEqual(exported.data.format, "yt-ceviri-cache");
-  const file = JSON.parse(JSON.stringify(exported.data)); // dosyaya yazılıp okunmuş gibi
+  const file = JSON.parse(JSON.stringify(exported.data)); // as if written to a file and read back
 
   const edgeGemini = makeGemini();
-  const edgeSide = makeContext({ gemini: edgeGemini, storage: makeStorage({}) }); // Edge'de anahtar yok
+  const edgeSide = makeContext({ gemini: edgeGemini, storage: makeStorage({}) }); // no API key in Edge
   const imported = await edgeSide.send({ type: "IMPORT_TRANSLATION_CACHE", data: file });
   assert.deepStrictEqual(
     [imported.imported, imported.existing, imported.incompatible, imported.invalid, imported.evicted],
@@ -359,32 +361,32 @@ test("dışa/içe aktarma: Chrome'da çevrilen video Edge'de API'ye gitmeden yü
   assert.strictEqual(ack.texts[29], "TR line 29");
   assert.strictEqual(edgeGemini.calls.length, 0);
 
-  // Aynı dosya ikinci kez içe aktarılırsa kayıtlar zaten vardır.
+  // Importing the same file again finds the entries already present.
   const again = await edgeSide.send({ type: "IMPORT_TRANSLATION_CACHE", data: file });
   assert.deepStrictEqual([again.imported, again.existing], [0, 2]);
 });
 
-test("içe aktarma: bozuk, uyumsuz ve yarım kayıtlar doğru ele alınır", async () => {
+test("import: malformed, incompatible and partial entries are handled correctly", async () => {
   const gemini = makeGemini();
   const { send, sent, storage } = makeContext({ gemini });
-  // Yerelde tam çevirisi olan video
+  // A video that is fully translated locally
   await send(translate("localFull01", cues(10)));
   await waitFor(() => sent.some((m) => m.type === "TRANSLATION_RESULT"));
   await new Promise((r) => setTimeout(r, 10));
   const localHash = storage.data["translation:localFull01"].hash;
 
   const base = { version: 1, model: "gemini-3.8-flash", complete: false, updatedAt: Date.now() };
-  const bigHash = (await send({ type: "EXPORT_TRANSLATION_CACHE" })).data.entries.localFull01.hash;
-  assert.strictEqual(bigHash, localHash);
+  const exportedHash = (await send({ type: "EXPORT_TRANSLATION_CACHE" })).data.entries.localFull01.hash;
+  assert.strictEqual(exportedHash, localHash);
   const file = {
     format: "yt-ceviri-cache",
     version: 1,
     entries: {
-      "bad id!": { ...base, hash: "x", texts: ["a"] }, // geçersiz videoId
-      noTexts0001: { ...base, hash: "x", texts: "nope" }, // bozuk
-      oldModel001: { ...base, model: "gemini-2.5-flash", hash: "x", texts: ["a"] }, // uyumsuz
-      localFull01: { ...base, hash: localHash, texts: new Array(10).fill(null) }, // yerel tam olan korunur
-      partial0001: { ...base, hash: "abc", texts: ["TR a", null] }, // yarım kayıt eklenir
+      "bad id!": { ...base, hash: "x", texts: ["a"] }, // invalid videoId
+      noTexts0001: { ...base, hash: "x", texts: "nope" }, // malformed
+      oldModel001: { ...base, model: "gemini-2.5-flash", hash: "x", texts: ["a"] }, // incompatible
+      localFull01: { ...base, hash: localHash, texts: new Array(10).fill(null) }, // the complete local entry is kept
+      partial0001: { ...base, hash: "abc", texts: ["TR a", null] }, // a partial entry is added
     },
   };
   const result = await send({ type: "IMPORT_TRANSLATION_CACHE", data: file });
@@ -397,10 +399,10 @@ test("içe aktarma: bozuk, uyumsuz ve yarım kayıtlar doğru ele alınır", asy
 
   const wrong = await send({ type: "IMPORT_TRANSLATION_CACHE", data: { hello: "world" } });
   assert.strictEqual(wrong.ok, false);
-  assert.ok(wrong.error.includes("dışa aktarma dosyası değil"));
+  assert.ok(wrong.error.includes("dışa aktarma dosyası değil")); // Turkish user-facing message
 });
 
-test("içe aktarma: önbellek bütçesi aşılırsa en eski kayıtlar silinir", async () => {
+test("import: the oldest entries are removed when the cache budget is exceeded", async () => {
   const gemini = makeGemini();
   const { send } = makeContext({ gemini, storage: makeStorage({}), cacheMaxBytes: 800 });
   const entries = {};
@@ -409,7 +411,7 @@ test("içe aktarma: önbellek bütçesi aşılırsa en eski kayıtlar silinir", 
       version: 1,
       model: "gemini-3.8-flash",
       hash: `h${i}`,
-      texts: Array.from({ length: 10 }, (_, j) => `TR satır ${j}`),
+      texts: Array.from({ length: 10 }, (_, j) => `TR line ${j}`),
       complete: true,
       updatedAt: 1000 + i,
     };
@@ -422,7 +424,7 @@ test("içe aktarma: önbellek bütçesi aşılırsa en eski kayıtlar silinir", 
   assert.ok(stats.bytes <= 800);
 });
 
-test("geçersiz veri reddedilir", async () => {
+test("invalid data is rejected", async () => {
   const { send } = makeContext({ gemini: makeGemini() });
   const ack = await send(translate("v1", [{ start: "0", duration: 1, text: "a" }]));
   assert.strictEqual(ack.ok, false);
@@ -439,6 +441,6 @@ test("geçersiz veri reddedilir", async () => {
       console.log(`FAIL ${name}\n     ${error.message}`);
     }
   }
-  console.log(failed ? `${failed} TEST BAŞARISIZ` : "TÜM TESTLER GEÇTİ");
+  console.log(failed ? `${failed} TESTS FAILED` : "ALL TESTS PASSED");
   process.exit(failed ? 1 : 0);
 })();

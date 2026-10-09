@@ -1,12 +1,13 @@
-// Çevrilmiş altyazıyı YouTube oynatıcısının üstünde gösterir ve kontrol çubuğuna
-// açma/kapama düğmesi ekler. content.js'ten önce yüklenir (aynı izole dünya).
-// Video zamanı <video> elemanından okunur; DOM'a yalnızca textContent ile yazılır.
+// Shows the translated subtitles over the YouTube player and adds an on/off button to the
+// control bar. Loaded before content.js (same isolated world).
+// Video time is read from the <video> element; the DOM is written only via textContent.
+// The button's labels are shown to the user, so they stay Turkish.
 
 const OVERLAY_STORAGE_KEY = "overlayEnabled";
-const OVERLAY_FONT_RATIO = 0.042; // Yazı boyutu / oynatıcı yüksekliği
+const OVERLAY_FONT_RATIO = 0.042; // Font size / player height
 const OVERLAY_MIN_FONT_PX = 14;
-const OVERLAY_MAX_LINES = 2; // Aynı anda gösterilen en fazla satır (üst üste binen altyazılar için)
-const OVERLAY_LOOKBACK = 5; // Üst üste binme için geriye bakılan satır sayısı
+const OVERLAY_MAX_LINES = 2; // Maximum lines shown at once (for overlapping captions)
+const OVERLAY_LOOKBACK = 5; // Lines to look back for overlaps
 
 class SubtitleOverlay {
   constructor() {
@@ -18,7 +19,7 @@ class SubtitleOverlay {
     this.video = null;
     this.frame = null;
     this.lastText = null;
-    this.onSeek = null; // content.js: çeviri sürerken sarılan konumu öne almak için
+    this.onSeek = null; // content.js: moves the seeked position to the front while translating
 
     this.container = document.createElement("div");
     this.container.className = "yt-ceviri-overlay";
@@ -47,7 +48,7 @@ class SubtitleOverlay {
         this.render();
         this.onSeek?.(this.video.currentTime);
       },
-      // Arka plan sekmesinde requestAnimationFrame durur; timeupdate yine de günceller.
+      // requestAnimationFrame stops in background tabs; timeupdate still keeps things current.
       timeupdate: this.render,
     };
 
@@ -59,7 +60,7 @@ class SubtitleOverlay {
       .catch(() => {});
   }
 
-  // Oynatıcı ve video elemanı değişebilir; her çağrıda bağlantılar kontrol edilir.
+  // The player and video element can change; connections are checked on every call.
   attach() {
     const player = document.getElementById("movie_player");
     const video = player?.querySelector("video.html5-main-video");
@@ -87,7 +88,7 @@ class SubtitleOverlay {
     return true;
   }
 
-  // Düğme CC düğmesinin soluna eklenir. YouTube kontrolleri yeniden çizerse tekrar eklenir.
+  // The button goes to the left of the CC button. Re-added if YouTube redraws its controls.
   ensureButton() {
     const ccButton = this.player.querySelector(".ytp-subtitles-button");
     const parent = ccButton?.parentElement || this.player.querySelector(".ytp-right-controls");
@@ -98,7 +99,8 @@ class SubtitleOverlay {
     this.updateButton();
   }
 
-  // Durumu değiştirmez: çeviri sürerken hazır parçalar gösterilir, durum "loading" kalır.
+  // Does not change the status: while translating, finished chunks are shown and the status
+  // stays "loading".
   setCues(cues) {
     this.cues = Array.isArray(cues) ? cues : [];
     this.lastText = null;
@@ -141,8 +143,8 @@ class SubtitleOverlay {
     button.classList.toggle("is-loading", this.status === "loading");
     button.classList.toggle("is-error", this.status === "error");
     button.classList.toggle("is-idle", this.status === "idle");
-    // Çeviri sürerken de tercih gösterilir; aksi halde düğme kapalı görünür ve
-    // kullanıcı "açmak" için basınca altyazıyı kapatmış olur.
+    // The preference is shown while translating too; otherwise the button looks off and a
+    // user pressing it to "turn it on" would actually turn the subtitles off.
     button.setAttribute("aria-pressed", String(this.enabled && this.status !== "idle"));
 
     const state = this.enabled ? "açık" : "kapalı";
@@ -154,13 +156,13 @@ class SubtitleOverlay {
     button.setAttribute("aria-label", title);
   }
 
-  // Overlay görünürken YouTube'un kendi altyazısı gizlenir (CSS, overlay.css).
+  // While the overlay is visible, YouTube's own captions are hidden (CSS, overlay.css).
   updatePlayerClass() {
     this.player?.classList.toggle("yt-ceviri-on", this.enabled && this.cues.length > 0);
   }
 
-  // Yazı boyutu oynatıcı yüksekliğine göre ayarlanır. Kontroller görünürken altyazı ilerleme
-  // çubuğunun üstünde durur; kontroller opaklıkla gizlendiği için ölçüm her durumda geçerlidir.
+  // Font size follows the player height. While the controls are visible the subtitles sit
+  // above the progress bar; the controls are hidden via opacity, so the measurement is always valid.
   updateLayout() {
     if (!this.player) return;
     const size = Math.max(OVERLAY_MIN_FONT_PX, Math.round(this.player.clientHeight * OVERLAY_FONT_RATIO));
@@ -174,7 +176,7 @@ class SubtitleOverlay {
     }
   }
 
-  // start <= time olan son satırı ikili aramayla bulur; üst üste binen satırları da toplar.
+  // Finds the last line with start <= time by binary search; also collects overlapping lines.
   findActiveText(time) {
     const cues = this.cues;
     let low = 0;

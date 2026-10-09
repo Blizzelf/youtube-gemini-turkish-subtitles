@@ -2,7 +2,8 @@
   "name": "youtube-ceviri",
   "version": "0.1.0",
   "private": true,
-  "description": "YouTube altyazılarını Gemini ile Türkçeye çeviren Chrome eklentisi (MV3).",
+  "description": "Chrome / Edge extension (MV3) that translates YouTube captions into Turkish with Gemini.",
+  "license": "MIT",
   "scripts": {
     "test": "node tests/segmenter.test.js && node tests/background.test.js"
   }

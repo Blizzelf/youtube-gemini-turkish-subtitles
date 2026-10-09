@@ -1,34 +1,35 @@
-// Otomatik (asr) altyazıyı cümle ve yan cümle sınırlarında yeniden böler.
-// content.js'ten önce yüklenir (aynı izole dünya).
+// Re-segments auto-generated (asr) captions at sentence and clause boundaries.
+// Loaded before content.js (same isolated world).
 //
-// YouTube'un otomatik altyazısı satırları ekran genişliğine göre keser; bu kesimler cümle
-// ortasına denk gelir ve çeviride anlam komşu satıra kayar. json3 formatındaki kelime
-// zamanları (tOffsetMs) kullanılarak kelimeler cümle sonlarında ve duraklamalarda yeniden
-// gruplanır. Ekrana sığmayan uzun cümleler virgüllerden ya da ortadan dengeli parçalara ayrılır.
+// YouTube's auto-generated captions break lines by screen width; those breaks land in the
+// middle of sentences, and in translation the meaning drifts into the neighboring line.
+// Using the word timings in json3 (tOffsetMs), words are regrouped at sentence ends and
+// pauses. Long sentences that do not fit on screen are split into balanced parts at commas
+// or near the middle.
 
-const SEGMENT_MAX_CHARS = 90; // Bir altyazının en fazla karakteri (yaklaşık iki satır)
-const SEGMENT_MAX_SECONDS = 7; // Bir altyazının en uzun süresi
-const SEGMENT_MIN_SECONDS = 1; // Kısa altyazılar sonraki altyazıya kadar en az bu kadar kalır
-const SEGMENT_PAUSE_SECONDS = 0.7; // Bu kadar sessizlik, cümle bitmese de altyazıyı böler
-const SEGMENT_JOIN_GAP_SECONDS = 0.6; // Altyazılar arası kısa boşluklar kapatılır (titreme olmasın)
-const WORD_MAX_SECONDS = 0.8; // json3 kelime bitişini vermez; bir kelimenin en uzun süresi varsayımı
+const SEGMENT_MAX_CHARS = 90; // Maximum characters per subtitle (about two lines)
+const SEGMENT_MAX_SECONDS = 7; // Maximum duration of a subtitle
+const SEGMENT_MIN_SECONDS = 1; // Short subtitles stay at least this long (up to the next one)
+const SEGMENT_PAUSE_SECONDS = 0.7; // A silence this long splits the subtitle even mid-sentence
+const SEGMENT_JOIN_GAP_SECONDS = 0.6; // Short gaps between subtitles are closed (no flicker)
+const WORD_MAX_SECONDS = 0.8; // json3 has no word end times; assumed maximum word duration
 
 const SENTENCE_END = /[.!?…。！？]["'”’)\]]*$/u;
 const CLAUSE_END = /[,;:，、；：]["'”’)\]]*$/u;
 const ABBREVIATION = /^(mr|mrs|ms|dr|prof|st|vs|etc|e\.g|i\.e)\.$/i;
 const SOUND_TAG = /^\[[^\]]*\]$/;
-// Uzun cümleler bu bağlaçlardan önce bölünmeyi tercih eder (otomatik altyazının çoğu İngilizce).
+// Long sentences prefer to split before these conjunctions (most auto captions are English).
 const CONJUNCTION =
   /^(and|but|so|because|that|which|who|when|where|while|if|or|how|then|than|until|since|although|though|whether|after|before)$/i;
-// Bu kelimelerden sonra kesmek ifadeyi böler ("the | leaderboards").
+// Cutting after these words splits a phrase ("the | leaderboards").
 const NO_BREAK_AFTER =
   /^(the|a|an|of|to|in|on|at|for|with|from|by|my|your|his|her|its|our|their|this|these|those|some|very|really|more|most)$/i;
-// Bu yazı sistemlerinde kelimeler arasında boşluk yoktur.
+// These scripts have no spaces between words.
 const NO_SPACE_SCRIPT = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Thai}]/u;
 
 const roundTime = (seconds) => Math.round(seconds * 1000) / 1000;
 
-// json3 olaylarından mutlak zamanlı kelime listesi çıkarır.
+// Builds a list of words with absolute times from json3 events.
 function extractWords(data) {
   const words = [];
   for (const event of data.events || []) {
@@ -41,21 +42,21 @@ function extractWords(data) {
       const raw = (seg.utf8 || "").replace(/\n/g, " ");
       if (!raw.trim()) continue;
       const start = eventStart + (seg.tOffsetMs || 0) / 1000;
-      // [Müzik] gibi etiketler satır boyunca sürer; kelimeler için kısa bir süre varsayılır.
+      // Tags such as [Music] last for the whole line; words get a short assumed duration.
       const maxEnd = SOUND_TAG.test(raw.trim()) ? eventEnd : start + WORD_MAX_SECONDS;
       words.push({ start, end: Math.min(maxEnd, eventEnd), raw, newLine: firstInLine });
       firstInLine = false;
     }
   }
 
-  // Kelime, sonraki kelime başlamadan biter.
+  // A word ends before the next one starts.
   for (let i = 0; i < words.length - 1; i++) {
     words[i].end = Math.max(words[i].start, Math.min(words[i].end, words[i + 1].start));
   }
   return words;
 }
 
-// Satır başındaki kelimelerde boşluk yoktur; gerekiyorsa eklenir.
+// Words at the start of a line have no leading space; one is added where needed.
 function joinWords(words) {
   let text = "";
   for (const word of words) {
@@ -74,7 +75,7 @@ function endsSentence(text) {
   return SENTENCE_END.test(text) && !ABBREVIATION.test(text);
 }
 
-// Kelimeleri cümle sonlarında, uzun duraklamalarda ve ses etiketlerinde gruplar.
+// Groups words at sentence ends, long pauses and sound tags.
 function splitIntoSentences(words) {
   const groups = [];
   let current = [];
@@ -105,8 +106,9 @@ function measure(words) {
   return { chars: joinWords(words).length, seconds: words[words.length - 1].end - words[0].start };
 }
 
-// Kesim noktası puanı: hedefe uzaklık (düşük iyi). Virgül gibi yan cümle sınırları,
-// bağlaçtan önceki aralar ve duraklamalar tercih edilir; artikel ve edattan sonrası kaçınılır.
+// Cut point score: distance from the target (lower is better). Clause boundaries such as
+// commas, gaps before conjunctions and pauses are preferred; cuts after articles and
+// prepositions are avoided.
 function cutScore(words, index, leftChars, target, totalChars) {
   let score = Math.abs(leftChars - target) / totalChars;
   const before = words[index - 1].raw.trim();
@@ -118,8 +120,8 @@ function cutScore(words, index, leftChars, target, totalChars) {
   return score;
 }
 
-// Ekrana sığmayan cümleyi gereken sayıda, yaklaşık eşit uzunlukta parçaya böler.
-// (İkiye bölmeyi tekrarlamak gereksiz küçük parçalar üretir.)
+// Splits a sentence that does not fit on screen into the needed number of roughly equal parts.
+// (Repeatedly halving produces needlessly small pieces.)
 function splitLongSentence(words) {
   const { chars, seconds } = measure(words);
   const parts = Math.max(Math.ceil(chars / SEGMENT_MAX_CHARS), Math.ceil(seconds / SEGMENT_MAX_SECONDS));
@@ -134,7 +136,7 @@ function splitLongSentence(words) {
     const target = (chars * part) / parts;
     let best = from;
     let bestScore = Infinity;
-    // Kalan her parçaya en az bir kelime bırakılır.
+    // Every remaining part keeps at least one word.
     for (let i = from; i <= words.length - (parts - part); i++) {
       const score = cutScore(words, i, leftChars[i], target, chars);
       if (score < bestScore) {
@@ -153,7 +155,7 @@ function splitLongSentence(words) {
     start = end;
   }
 
-  // Tercihli kesimler parçayı sınırın biraz üstüne taşıyabilir; çok aşan parça tekrar bölünür.
+  // Preferred cuts can push a part slightly over the limit; a part far over it is split again.
   return pieces.flatMap((piece) => {
     const size = measure(piece);
     const tooLong = size.chars > SEGMENT_MAX_CHARS * 1.2 || size.seconds > SEGMENT_MAX_SECONDS * 1.2;
@@ -161,7 +163,7 @@ function splitLongSentence(words) {
   });
 }
 
-// Gruplardan { start, duration, text } altyazıları üretir. Altyazılar üst üste binmez.
+// Builds { start, duration, text } subtitles from the groups. Subtitles never overlap.
 function groupsToCues(groups) {
   const cues = groups
     .map((words) => ({ start: words[0].start, end: words[words.length - 1].end, text: joinWords(words) }))
@@ -181,7 +183,7 @@ function groupsToCues(groups) {
   }));
 }
 
-// json3 verisinden cümle bazlı altyazı dizisi üretir.
+// Builds a sentence-based subtitle array from json3 data.
 function buildAsrCues(data) {
   const sentences = splitIntoSentences(extractWords(data));
   return groupsToCues(sentences.flatMap(splitLongSentence));

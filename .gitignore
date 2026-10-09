@@ -1,13 +1,13 @@
-# Popup'tan dışa aktarılan çeviri önbelleği dosyaları
+# Translation cache files exported from the popup
 yt-ceviri-onbellek-*.json
 
-# Anahtar veya gizli bilgi içerebilecek yerel dosyalar
+# Local files that may contain keys or secrets
 .env
 .env.*
 *.pem
 *.crx
 
-# Bağımlılıklar ve sistem dosyaları
+# Dependencies and system files
 node_modules/
 .DS_Store
 Thumbs.db

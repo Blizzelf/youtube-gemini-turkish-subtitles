@@ -1,13 +1,18 @@
-// Service worker: Gemini API anahtarını okuyan tek yer burasıdır.
-// Content script anahtarı asla görmez; altyazıyı mesajla gönderir, çeviriyi parça parça geri alır.
+// Service worker: the only place that reads the Gemini API key.
+// The content script never sees the key; it sends captions by message and receives the
+// translation back chunk by chunk.
 //
-// Çeviri akışı:
-// 1. Önbellek: video daha önce tamamen çevrildiyse API'ye hiç gidilmez. Yarıda kaldıysa
-//    çevrilen kısım hemen gönderilir ve çeviri kaldığı yerden sürer.
-// 2. Kümeleme: altyazı en fazla 40 satır / 6000 karakterlik parçalara bölünür.
-// 3. Kuyruk: tüm Gemini istekleri (bütün sekmeler için) tek sırada ve aralarında en az
-//    2,5 sn beklenerek gönderilir. 429 gelirse kuyruk durur, parça artan sürelerle tekrar denenir.
-// 4. Her parça bitince sekmeye gönderilir ve önbelleğe yazılır. Oynatma konumundaki parça önce çevrilir.
+// Translation flow:
+// 1. Cache: if the video was fully translated before, the API is not called at all. If a
+//    translation was interrupted, the finished part is sent right away and work resumes.
+// 2. Batching: captions are split into chunks of at most 40 lines / 6000 characters.
+// 3. Queue: all Gemini requests (for every tab) go through a single serial queue with at
+//    least 2.5 s between them. On 429 the queue pauses and the chunk is retried with
+//    exponential backoff.
+// 4. Each finished chunk is sent to the tab and written to the cache. The chunk at the
+//    current playback position is translated first.
+//
+// Strings shown to the user (overlay, popup) are Turkish; log messages are English.
 
 const STORAGE_KEY = "geminiApiKey";
 const LOG_PREFIX = "[YT Çeviri]";
@@ -15,30 +20,30 @@ const LOG_PREFIX = "[YT Çeviri]";
 const GEMINI_MODEL = "gemini-3.8-flash";
 const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
-// Kümeleme
+// Batching
 const CHUNK_MAX_ITEMS = 40;
-const CHUNK_MAX_CHARS = 6000; // Satır metni + JSON alanları; token sınırının çok altında kalır
-const CHUNK_FIELD_CHARS = 40; // Bir satırın start/duration alanları için yaklaşık pay
+const CHUNK_MAX_CHARS = 6000; // Caption text + JSON fields; stays well below the token limit
+const CHUNK_FIELD_CHARS = 40; // Rough allowance for a line's start/duration fields
 const MAX_CUES = 5000;
-const TIMESTAMP_TOLERANCE = 0.01; // saniye
+const TIMESTAMP_TOLERANCE = 0.01; // seconds
 
-// Kuyruk ve yeniden deneme
-const MIN_REQUEST_INTERVAL_MS = 2500; // Ardışık iki istek arasında en az bekleme
-const MAX_ATTEMPTS = 8; // Geçici hatalarda (429, 5xx, ağ) bir parça için toplam deneme
-const BACKOFF_BASE_MS = 4000; // 4, 8, 16, 32, 60, 60… sn
+// Queue and retries
+const MIN_REQUEST_INTERVAL_MS = 2500; // Minimum gap between two consecutive requests
+const MAX_ATTEMPTS = 8; // Total attempts per chunk on transient errors (429, 5xx, network)
+const BACKOFF_BASE_MS = 4000; // 4, 8, 16, 32, 60, 60… s
 const BACKOFF_MAX_MS = 60000;
-const BACKOFF_JITTER_MS = 1000; // Aynı anda tekrar denemeleri dağıtmak için rastgele ek
-const RETRY_AFTER_MAX_MS = 5 * 60 * 1000; // API'nin önerdiği bekleme için üst sınır
+const BACKOFF_JITTER_MS = 1000; // Random extra delay so retries do not line up
+const RETRY_AFTER_MAX_MS = 5 * 60 * 1000; // Upper bound for the delay suggested by the API
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
 const KEEPALIVE_INTERVAL_MS = 20000;
 
-// Önbellek (chrome.storage.local kotası 10 MB)
-const CACHE_VERSION = 1; // İstem veya çıktı biçimi değişince artırılır; eski kayıtlar kullanılmaz
+// Cache (chrome.storage.local quota is 10 MB)
+const CACHE_VERSION = 1; // Bump when the prompt or output format changes; old entries are ignored
 const CACHE_PREFIX = "translation:";
 const CACHE_INDEX_KEY = "translationIndex"; // videoId -> { updatedAt, bytes }
 const CACHE_MAX_BYTES = 8 * 1024 * 1024;
 
-// Dışa / içe aktarma dosyası
+// Export / import file
 const EXPORT_FORMAT = "yt-ceviri-cache";
 const VIDEO_ID_PATTERN = /^[\w-]{6,20}$/;
 const IMPORT_MAX_TEXT_CHARS = 2000;
@@ -82,7 +87,7 @@ const RESPONSE_SCHEMA = {
   },
 };
 
-// API'den gelen hata (HTTP veya ağ). retryable ise tekrar denenir.
+// Error from the API (HTTP or network). Retried when retryable.
 class GeminiApiError extends Error {
   constructor(message, { status = null, retryable = false, retryAfterMs = null, dailyQuota = false } = {}) {
     super(message);
@@ -94,7 +99,8 @@ class GeminiApiError extends Error {
   }
 }
 
-// Yanıt geldi ama yapı bozuk (satır sayısı, zaman damgası, JSON). Parça bölünerek tekrar denenir.
+// A response arrived but its structure is broken (line count, timestamps, JSON).
+// The chunk is split and retried.
 class TranslationFormatError extends Error {
   constructor(message) {
     super(message);
@@ -103,7 +109,7 @@ class TranslationFormatError extends Error {
 }
 
 chrome.runtime.onInstalled.addListener((details) => {
-  console.log(`${LOG_PREFIX} Eklenti ${details.reason} (v${chrome.runtime.getManifest().version})`);
+  console.log(`${LOG_PREFIX} Extension ${details.reason} (v${chrome.runtime.getManifest().version})`);
 });
 
 async function getApiKey() {
@@ -113,7 +119,7 @@ async function getApiKey() {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// --- Gemini isteği ---
+// --- Gemini request ---
 
 function buildRequestBody(chunk, title) {
   const parts = [];
@@ -140,7 +146,7 @@ function parseRetryDelay(data) {
   return Number.isFinite(seconds) ? Math.ceil(seconds * 1000) : null;
 }
 
-// Günlük kota dolduysa beklemek işe yaramaz; tekrar denenmez.
+// Waiting does not help once the daily quota is used up; such errors are not retried.
 function isDailyQuota(data) {
   const violations = findErrorDetail(data, "QuotaFailure")?.violations || [];
   return violations.some((violation) => /PerDay/i.test(violation.quotaId || ""));
@@ -150,12 +156,12 @@ function extractResponseText(data) {
   const candidate = data?.candidates?.[0];
   if (!candidate) {
     const blockReason = data?.promptFeedback?.blockReason;
-    throw new TranslationFormatError(blockReason ? `İstek engellendi: ${blockReason}` : "Yanıt boş.");
+    throw new TranslationFormatError(blockReason ? `Request blocked: ${blockReason}` : "Empty response.");
   }
   if (candidate.finishReason && candidate.finishReason !== "STOP") {
-    throw new TranslationFormatError(`Yanıt tamamlanmadı: ${candidate.finishReason}`);
+    throw new TranslationFormatError(`Response not finished: ${candidate.finishReason}`);
   }
-  // Düşünce (thought) parçaları çıktıya dahil değildir.
+  // Thought parts are not part of the output.
   return (candidate.content?.parts || [])
     .filter((part) => !part.thought && typeof part.text === "string")
     .map((part) => part.text)
@@ -169,7 +175,7 @@ async function callGemini(apiKey, chunk, title) {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        // Anahtar URL yerine başlıkta gönderilir; böylece loglarda ve geçmişte görünmez.
+        // The key goes in a header instead of the URL so it never shows up in logs or history.
         "x-goog-api-key": apiKey,
       },
       body: JSON.stringify(buildRequestBody(chunk, title)),
@@ -191,39 +197,39 @@ async function callGemini(apiKey, chunk, title) {
   return extractResponseText(data);
 }
 
-// --- Yanıt doğrulama ---
+// --- Response validation ---
 
 const sameTime = (a, b) => typeof a === "number" && Math.abs(a - b) <= TIMESTAMP_TOLERANCE;
 
-// Modelin çıktısını orijinal parçayla satır satır karşılaştırır ve yalnızca metinleri döner.
+// Compares the model output with the original chunk line by line and returns only the texts.
 function parseTranslatedTexts(chunk, rawText) {
   let items;
   try {
     const cleaned = rawText.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
     items = JSON.parse(cleaned);
   } catch {
-    throw new TranslationFormatError("Yanıt geçerli JSON değil.");
+    throw new TranslationFormatError("Response is not valid JSON.");
   }
 
   if (!Array.isArray(items) || items.length !== chunk.length) {
-    throw new TranslationFormatError(`Satır sayısı uyuşmuyor: ${items?.length} / ${chunk.length}`);
+    throw new TranslationFormatError(`Line count mismatch: ${items?.length} / ${chunk.length}`);
   }
 
   return chunk.map((cue, i) => {
     const item = items[i];
     if (!sameTime(item?.start, cue.start) || !sameTime(item?.duration, cue.duration)) {
-      throw new TranslationFormatError(`Zaman damgası değişmiş (satır ${i}, start ${cue.start}).`);
+      throw new TranslationFormatError(`Timestamp changed (line ${i}, start ${cue.start}).`);
     }
     const text = typeof item.text === "string" ? item.text.trim() : "";
     return text || cue.text;
   });
 }
 
-// --- İstek kuyruğu (throttling) ---
+// --- Request queue (throttling) ---
 
-// Tüm Gemini istekleri bu zincirde sırayla çalışır; aynı anda yalnızca bir istek vardır.
+// Every Gemini request runs through this chain one at a time; only one request is in flight.
 let requestQueue = Promise.resolve();
-// Bir sonraki isteğin en erken başlayabileceği an. 429 sonrası ileri alınır; tüm işler bekler.
+// Earliest moment the next request may start. Pushed forward after a 429; every job waits.
 let nextRequestAt = 0;
 
 function enqueueGeminiRequest(task) {
@@ -250,7 +256,7 @@ function backoffDelay(attempt, retryAfterMs) {
   return Math.min(Math.max(backoff, retryAfterMs ?? 0) + jitter, RETRY_AFTER_MAX_MS);
 }
 
-// Bir parçayı çevirir. Geçici hatalarda kuyruğu durdurup artan sürelerle tekrar dener.
+// Translates one chunk. On transient errors it pauses the queue and retries with growing delays.
 async function requestChunk(apiKey, chunk, job) {
   for (let attempt = 1; ; attempt++) {
     try {
@@ -261,6 +267,7 @@ async function requestChunk(apiKey, chunk, job) {
 
       const delay = backoffDelay(attempt, error.retryAfterMs);
       pauseQueue(delay);
+      // Shown to the user in the overlay, so it stays Turkish.
       const reason = error.status === 429 ? "Gemini hız sınırı (429)" : `Gemini geçici hata (${error.status ?? "ağ"})`;
       const message = `${reason}; ${Math.ceil(delay / 1000)} sn sonra tekrar denenecek (${attempt + 1}/${MAX_ATTEMPTS}).`;
       console.warn(`${LOG_PREFIX} ${message} ${error.message}`);
@@ -269,7 +276,8 @@ async function requestChunk(apiKey, chunk, job) {
   }
 }
 
-// Yapı bozuk gelirse parçayı ikiye bölüp tekrar dener; tek satırda da olmazsa orijinal metin kalır.
+// If the structure comes back broken, the chunk is halved and retried; if a single line still
+// fails, its original text is kept.
 async function translateChunk(apiKey, chunk, job) {
   try {
     return await requestChunk(apiKey, chunk, job);
@@ -277,11 +285,11 @@ async function translateChunk(apiKey, chunk, job) {
     if (!(error instanceof TranslationFormatError)) throw error;
 
     if (chunk.length === 1) {
-      console.warn(`${LOG_PREFIX} Satır çevrilemedi, orijinal bırakıldı (start ${chunk[0].start}): ${error.message}`);
+      console.warn(`${LOG_PREFIX} Line not translated, original kept (start ${chunk[0].start}): ${error.message}`);
       return [chunk[0].text];
     }
 
-    console.warn(`${LOG_PREFIX} ${error.message} ${chunk.length} satırlık parça bölünüyor.`);
+    console.warn(`${LOG_PREFIX} ${error.message} Splitting the ${chunk.length}-line chunk.`);
     const middle = Math.ceil(chunk.length / 2);
     const first = await translateChunk(apiKey, chunk.slice(0, middle), job);
     const second = await translateChunk(apiKey, chunk.slice(middle), job);
@@ -289,9 +297,9 @@ async function translateChunk(apiKey, chunk, job) {
   }
 }
 
-// --- Kümeleme ---
+// --- Batching ---
 
-// Altyazı dizisini satır ve karakter sınırına göre [start, end) aralıklarına böler.
+// Splits the caption array into [start, end) ranges by line and character limits.
 function createChunks(captions) {
   const chunks = [];
   let start = 0;
@@ -309,9 +317,9 @@ function createChunks(captions) {
   return chunks;
 }
 
-// --- Önbellek ---
+// --- Cache ---
 
-// Önbellek yazımları sırayla yapılır; dizin (index) aynı anda iki yerden değişmesin.
+// Cache writes run one at a time so the index is never changed from two places at once.
 let cacheQueue = Promise.resolve();
 function withCacheLock(task) {
   const run = cacheQueue.then(task);
@@ -319,7 +327,8 @@ function withCacheLock(task) {
   return run;
 }
 
-// Altyazı değişirse (ör. bölme kuralları güncellenirse) eski çeviri kullanılmaz (FNV-1a).
+// If the captions change (e.g. the segmentation rules are updated), the old translation is
+// not used (FNV-1a).
 function hashCaptions(captions, language) {
   const text = `${language}\n${captions.map((cue) => `${cue.start}|${cue.duration}|${cue.text}`).join("\n")}`;
   let hash = 0x811c9dc5;
@@ -342,8 +351,9 @@ async function readTranslation(videoId, hash, count) {
   return valid ? entry : null;
 }
 
-// Kayıtları ve dizini yazar; bütçe aşılırsa en uzun süredir kullanılmayan kayıtlar silinir (LRU).
-// En yeni kayıt, tek başına bütçeyi aşsa bile silinmez. withCacheLock içinde çağrılır.
+// Writes entries and the index; when over budget, the least recently used entries are removed
+// (LRU). The newest entry is never removed, even if it alone exceeds the budget.
+// Must be called inside withCacheLock.
 async function storeEntries(entries) {
   const index = (await chrome.storage.local.get(CACHE_INDEX_KEY))[CACHE_INDEX_KEY] || {};
   const values = {};
@@ -361,7 +371,7 @@ async function storeEntries(entries) {
     total -= info.bytes;
     delete index[videoId];
     evicted++;
-    // Bu yazımda eklenen bir kayıt silinecekse hiç yazılmaz.
+    // An entry added in this same write is simply not written.
     if (CACHE_PREFIX + videoId in values) delete values[CACHE_PREFIX + videoId];
     else removals.push(CACHE_PREFIX + videoId);
   }
@@ -371,7 +381,7 @@ async function storeEntries(entries) {
   return { evicted };
 }
 
-// Çeviri işinin ilerlemesini kaydeder (her parçadan sonra).
+// Saves a translation job's progress (after every chunk).
 function saveTranslation(job) {
   const entry = {
     version: CACHE_VERSION,
@@ -382,7 +392,7 @@ function saveTranslation(job) {
     updatedAt: Date.now(),
   };
   return withCacheLock(() => storeEntries({ [job.videoId]: entry })).catch((error) =>
-    console.warn(`${LOG_PREFIX} Önbelleğe yazılamadı:`, error)
+    console.warn(`${LOG_PREFIX} Could not write to the cache:`, error)
   );
 }
 
@@ -392,18 +402,19 @@ async function getCacheStats() {
   return { count: entries.length, bytes: entries.reduce((sum, info) => sum + info.bytes, 0) };
 }
 
-// Tüm çeviri kayıtlarını siler; dizinde olmayan (yarım kalmış yazımdan kalan) kayıtlar da bulunur.
+// Removes every translation entry, including ones missing from the index (left over from an
+// interrupted write).
 function clearTranslationCache() {
   return withCacheLock(async () => {
     const { bytes } = await getCacheStats();
     const keys = Object.keys(await chrome.storage.local.get(null)).filter((key) => key.startsWith(CACHE_PREFIX));
     await chrome.storage.local.remove([...keys, CACHE_INDEX_KEY]);
-    console.log(`${LOG_PREFIX} Önbellek temizlendi: ${keys.length} video`);
+    console.log(`${LOG_PREFIX} Cache cleared: ${keys.length} videos`);
     return { removed: keys.length, bytes };
   });
 }
 
-// --- Dışa / içe aktarma (popup) ---
+// --- Export / import (popup) ---
 
 async function exportTranslationCache() {
   const all = await chrome.storage.local.get(null);
@@ -414,7 +425,7 @@ async function exportTranslationCache() {
   return { format: EXPORT_FORMAT, version: CACHE_VERSION, exportedAt: new Date().toISOString(), entries };
 }
 
-// Dosya kullanıcıdan gelir; yapısı tek tek doğrulanır.
+// The file comes from the user; every entry's structure is validated.
 function isWellFormedEntry(videoId, entry) {
   return (
     VIDEO_ID_PATTERN.test(videoId) &&
@@ -426,8 +437,8 @@ function isWellFormedEntry(videoId, entry) {
   );
 }
 
-// Başka bir tarayıcıdan dışa aktarılan çevirileri ekler. Bu tarayıcıda zaten tam çevirisi
-// olan videolar korunur; farklı önbellek sürümü veya modelle yapılmış çeviriler atlanır.
+// Adds translations exported from another browser. Videos already fully translated in this
+// browser are kept; translations made with a different cache version or model are skipped.
 function importTranslationCache(data) {
   if (data?.format !== EXPORT_FORMAT || !data.entries || typeof data.entries !== "object") {
     throw new Error("Dosya bu eklentinin dışa aktarma dosyası değil.");
@@ -469,12 +480,12 @@ function importTranslationCache(data) {
 
     stats.imported = Object.keys(accepted).length;
     if (stats.imported) stats.evicted = (await storeEntries(accepted)).evicted;
-    console.log(`${LOG_PREFIX} İçe aktarma: ${JSON.stringify(stats)}`);
+    console.log(`${LOG_PREFIX} Import: ${JSON.stringify(stats)}`);
     return stats;
   });
 }
 
-// Önbellekten okunan kaydı en son kullanılan olarak işaretler.
+// Marks an entry read from the cache as most recently used.
 function touchTranslation(videoId) {
   return withCacheLock(async () => {
     const index = (await chrome.storage.local.get(CACHE_INDEX_KEY))[CACHE_INDEX_KEY] || {};
@@ -484,13 +495,14 @@ function touchTranslation(videoId) {
   }).catch(() => {});
 }
 
-// --- Çeviri işleri ---
+// --- Translation jobs ---
 
-const jobs = new Map(); // `${videoId}:${hash}` -> iş
-const jobsStarting = new Map(); // `${videoId}:${hash}` -> Promise; başlatma sırasında gelen istekler bekler
+const jobs = new Map(); // `${videoId}:${hash}` -> job
+const jobsStarting = new Map(); // `${videoId}:${hash}` -> Promise; requests arriving while a job starts wait on it
 let keepAliveTimer = null;
 
-// Uzun çevirilerde (429 beklemeleri dahil) service worker'ın 30 sn boşta kalınca kapanmasını önler.
+// Keeps the service worker from shutting down after 30 s idle during long translations
+// (including 429 waits).
 function updateKeepAlive() {
   if (jobs.size && !keepAliveTimer) {
     keepAliveTimer = setInterval(() => chrome.runtime.getPlatformInfo(), KEEPALIVE_INTERVAL_MS);
@@ -503,7 +515,7 @@ function updateKeepAlive() {
 function notifyTargets(targets, message) {
   for (const target of targets) {
     const [tabId, frameId] = target.split(":").map(Number);
-    // Sekme kapanmış veya sayfa değişmiş olabilir; hata yok sayılır.
+    // The tab may have closed or navigated away; errors are ignored.
     chrome.tabs.sendMessage(tabId, message, { frameId }).catch(() => {});
   }
 }
@@ -514,7 +526,7 @@ function progressOf(job) {
   return { done: job.chunks.filter((chunk) => isChunkDone(job, chunk)).length, total: job.chunks.length };
 }
 
-// Oynatma konumunu içeren (ya da ondan sonraki) parça önce çevrilir; sonra baştakiler.
+// The chunk containing (or following) the playback position goes first, then the earlier ones.
 function pickNextChunk(job) {
   const pending = job.chunks.filter((chunk) => !isChunkDone(job, chunk));
   if (!pending.length) return null;
@@ -533,7 +545,7 @@ async function runJob(job, apiKey) {
     texts.forEach((text, i) => {
       job.texts[chunk.start + i] = text;
     });
-    // Kısmi ilerleme de kaydedilir; çeviri yarıda kalırsa buradan devam eder.
+    // Partial progress is saved too, so an interrupted translation resumes from here.
     await saveTranslation(job);
     job.notify({ type: "TRANSLATION_CHUNK", startIndex: chunk.start, texts, ...progressOf(job) });
   }
@@ -557,18 +569,19 @@ function startJob({ apiKey, key, videoId, title, captions, hash, texts, priority
   const startedAt = Date.now();
   const { done, total } = progressOf(job);
   console.log(
-    `${LOG_PREFIX} Çeviri ${done ? "kaldığı yerden sürüyor" : "başladı"}: videoId=${videoId}, ` +
-      `${captions.length} satır, ${done}/${total} parça hazır, model=${GEMINI_MODEL}`
+    `${LOG_PREFIX} Translation ${done ? "resumed" : "started"}: videoId=${videoId}, ` +
+      `${captions.length} lines, ${done}/${total} chunks ready, model=${GEMINI_MODEL}`
   );
 
   runJob(job, apiKey)
     .then(() => {
-      console.log(`${LOG_PREFIX} Çeviri bitti: videoId=${videoId}, ${((Date.now() - startedAt) / 1000).toFixed(1)} sn`);
+      console.log(`${LOG_PREFIX} Translation finished: videoId=${videoId}, ${((Date.now() - startedAt) / 1000).toFixed(1)} s`);
       job.notify({ type: "TRANSLATION_RESULT", texts: job.texts, fromCache: false });
     })
     .catch((error) => {
-      console.error(`${LOG_PREFIX} Çeviri başarısız: videoId=${videoId}`, error);
+      console.error(`${LOG_PREFIX} Translation failed: videoId=${videoId}`, error);
       const saved = progressOf(job).done > 0;
+      // Shown to the user in the overlay, so it stays Turkish.
       const message = error.dailyQuota
         ? `Gemini günlük kotası doldu.${saved ? " Çevrilen kısım kaydedildi; kota yenilenince kaldığı yerden devam eder." : ""}`
         : error.message;
@@ -582,7 +595,7 @@ function startJob({ apiKey, key, videoId, title, captions, hash, texts, priority
   return job;
 }
 
-// Gelen veriyi doğrular ve yalnızca start, duration, text alanlarını bırakır.
+// Validates incoming data and keeps only the start, duration and text fields.
 function normalizeCaptions(captions) {
   if (!Array.isArray(captions) || captions.length === 0 || captions.length > MAX_CUES) return null;
 
@@ -596,7 +609,8 @@ function normalizeCaptions(captions) {
   return normalized;
 }
 
-// --- Mesajlar ---
+// --- Messages ---
+// Error texts returned here are shown in the overlay, so they stay Turkish.
 
 async function handleTranslate(message, sender) {
   const tabId = sender.tab?.id;
@@ -618,14 +632,15 @@ async function handleTranslate(message, sender) {
   const target = `${tabId}:${sender.frameId ?? 0}`;
   const priorityTime = Number.isFinite(message.currentTime) ? message.currentTime : 0;
 
-  // Aynı video şu an başlatılıyorsa (önbellek okunurken) ikinci bir iş açılmaz.
+  // If the same video is being started right now (cache read in progress), no second job is opened.
   const starting = jobsStarting.get(key);
   if (starting) {
     await starting;
     return handleTranslate(message, sender);
   }
 
-  // Aynı video zaten çevriliyorsa bu sekme de sonuçları alır; hazır olan kısım hemen gönderilir.
+  // If the same video is already being translated, this tab receives the results too; the
+  // finished part is sent immediately.
   const running = jobs.get(key);
   if (running) {
     running.targets.add(target);
@@ -643,11 +658,11 @@ async function handleTranslate(message, sender) {
 }
 
 async function startOrLoadTranslation({ message, videoId, captions, hash, key, target, priorityTime }) {
-  // 1) Önbellek: tamamlanmış çeviri varsa API'ye gidilmez (anahtar da gerekmez).
+  // 1) Cache: a complete translation needs no API call (and no key).
   const cached = await readTranslation(videoId, hash, captions.length);
   if (cached?.complete) {
     touchTranslation(videoId);
-    console.log(`${LOG_PREFIX} Önbellekten yüklendi: videoId=${videoId}, ${captions.length} satır`);
+    console.log(`${LOG_PREFIX} Loaded from cache: videoId=${videoId}, ${captions.length} lines`);
     return { ok: true, status: "cached", texts: cached.texts };
   }
 
@@ -660,7 +675,7 @@ async function startOrLoadTranslation({ message, videoId, captions, hash, key, t
     };
   }
 
-  // 2) Yarıda kalmış çeviri varsa kaldığı yerden sürer.
+  // 2) An interrupted translation resumes where it stopped.
   const job = startJob({
     apiKey,
     key,
@@ -684,19 +699,19 @@ async function handleMessage(message, sender) {
 
     case "CONTENT_READY": {
       const tabId = sender.tab?.id;
-      console.log(`${LOG_PREFIX} İzleme sayfası hazır: videoId=${message.videoId}, tabId=${tabId}`);
+      console.log(`${LOG_PREFIX} Watch page ready: videoId=${message.videoId}, tabId=${tabId}`);
       return { ok: true };
     }
 
     case "TRANSLATE":
       return handleTranslate(message, sender);
 
-    // Popup: önbellek bilgisi ve temizleme.
+    // Popup: cache info and clearing.
     case "GET_CACHE_STATS":
       return { ok: true, ...(await getCacheStats()), activeJobs: jobs.size };
 
     case "CLEAR_TRANSLATION_CACHE":
-      // Süren çeviriler her parçadan sonra kaydettiği için bitince yeniden önbellekte olur.
+      // Running jobs save after every chunk, so they end up in the cache again when they finish.
       return { ok: true, ...(await clearTranslationCache()), activeJobs: jobs.size };
 
     case "EXPORT_TRANSLATION_CACHE": {
@@ -707,7 +722,7 @@ async function handleMessage(message, sender) {
     case "IMPORT_TRANSLATION_CACHE":
       return { ok: true, ...(await importTranslationCache(message.data)) };
 
-    // Kullanıcı ileri/geri sardı: o konumdaki parça öne alınır.
+    // The user seeked: the chunk at that position moves to the front.
     case "TRANSLATION_PRIORITY": {
       if (Number.isFinite(message.time)) {
         for (const job of jobs.values()) {
@@ -718,12 +733,12 @@ async function handleMessage(message, sender) {
     }
 
     default:
-      return { ok: false, error: `Bilinmeyen mesaj tipi: ${message?.type}` };
+      return { ok: false, error: `Unknown message type: ${message?.type}` };
   }
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  // Yalnızca bu eklentiden gelen mesajları kabul et.
+  // Accept messages from this extension only.
   if (sender.id !== chrome.runtime.id) {
     return false;
   }
@@ -731,10 +746,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   handleMessage(message, sender)
     .then(sendResponse)
     .catch((error) => {
-      console.error(`${LOG_PREFIX} Mesaj işlenemedi:`, error);
+      console.error(`${LOG_PREFIX} Message handling failed:`, error);
       sendResponse({ ok: false, error: String(error?.message || error) });
     });
 
-  // Asenkron yanıt vereceğimizi bildir.
+  // Tell Chrome we will respond asynchronously.
   return true;
 });
