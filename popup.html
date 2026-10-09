@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>YouTube Çeviri</title>
+  <style>
+    :root {
+      --bg: #f6f7f9;
+      --card: #ffffff;
+      --text: #1f2328;
+      --muted: #656d76;
+      --border: #d0d7de;
+      --accent: #c4302b;
+      --accent-hover: #a82824;
+      --success-bg: #e6f4ea;
+      --success-text: #1e7b34;
+      --error-bg: #fdecea;
+      --error-text: #b3261e;
+      --neutral-bg: #eef1f4;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #16181b;
+        --card: #202327;
+        --text: #e6e8eb;
+        --muted: #9aa2ab;
+        --border: #3a3f45;
+        --success-bg: #1c3324;
+        --success-text: #7fd197;
+        --error-bg: #3a1f1d;
+        --error-text: #f2a7a1;
+        --neutral-bg: #2a2e33;
+      }
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      width: 320px;
+      padding: 16px;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+    }
+
+    h1 {
+      margin: 0 0 4px;
+      font-size: 16px;
+      font-weight: 600;
+    }
+
+    .subtitle {
+      margin: 0 0 14px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .badge {
+      display: inline-block;
+      margin-bottom: 14px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 500;
+      background: var(--neutral-bg);
+      color: var(--muted);
+    }
+
+    .badge.saved {
+      background: var(--success-bg);
+      color: var(--success-text);
+    }
+
+    label {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .input-row {
+      display: flex;
+      gap: 6px;
+    }
+
+    input[type="password"],
+    input[type="text"] {
+      flex: 1;
+      min-width: 0;
+      padding: 8px 10px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--card);
+      color: var(--text);
+      font: 13px ui-monospace, "Cascadia Mono", Consolas, monospace;
+    }
+
+    input:focus {
+      outline: 2px solid var(--accent);
+      outline-offset: -1px;
+      border-color: transparent;
+    }
+
+    button {
+      padding: 8px 12px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--card);
+      color: var(--text);
+      font: inherit;
+      font-size: 13px;
+      cursor: pointer;
+    }
+
+    button:hover { background: var(--neutral-bg); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .actions button { flex: 1; }
+
+    #saveBtn {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+      font-weight: 600;
+    }
+
+    #saveBtn:hover { background: var(--accent-hover); }
+
+    .message {
+      min-height: 18px;
+      margin-top: 10px;
+      font-size: 12px;
+    }
+
+    .message.success { color: var(--success-text); }
+    .message.error { color: var(--error-text); }
+
+    .footer {
+      margin-top: 12px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .footer a { color: var(--accent); }
+
+    .cache {
+      margin-top: 14px;
+      padding-top: 14px;
+      border-top: 1px solid var(--border);
+    }
+
+    .cache-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    h2 {
+      margin: 0;
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .cache-stats {
+      margin: 2px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    #clearCacheBtn { flex-shrink: 0; }
+
+    /* İçe aktarma için popup bir sekmede açılır (?view=tab). */
+    body.tab-view {
+      width: auto;
+      min-height: 100vh;
+      padding-top: 48px;
+    }
+
+    body.tab-view .card {
+      max-width: 360px;
+      margin: 0 auto;
+    }
+
+    #clearCacheBtn.confirm {
+      background: var(--error-bg);
+      border-color: var(--error-text);
+      color: var(--error-text);
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <h1>YouTube Çeviri</h1>
+    <p class="subtitle">Çeviri için kendi Gemini API anahtarınızı girin. Anahtar yalnızca bu tarayıcıda saklanır.</p>
+
+    <span id="status" class="badge">Kontrol ediliyor…</span>
+
+    <label for="apiKey">Gemini API anahtarı</label>
+    <div class="input-row">
+      <input id="apiKey" type="password" placeholder="AIza…" autocomplete="off" spellcheck="false">
+      <button id="toggleBtn" type="button" aria-label="Anahtarı göster">Göster</button>
+    </div>
+
+    <div class="actions">
+      <button id="saveBtn" type="button">Kaydet</button>
+      <button id="deleteBtn" type="button">Sil</button>
+    </div>
+
+    <div id="message" class="message" aria-live="polite"></div>
+
+    <p class="footer">
+      Anahtarınız yok mu?
+      <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer">Google AI Studio'dan alın</a>
+    </p>
+
+    <section class="cache" aria-labelledby="cacheTitle">
+      <div class="cache-row">
+        <div>
+          <h2 id="cacheTitle">Çeviri önbelleği</h2>
+          <p id="cacheStats" class="cache-stats">Yükleniyor…</p>
+        </div>
+        <button id="clearCacheBtn" type="button" disabled>Önbelleği temizle</button>
+      </div>
+      <div class="actions">
+        <button id="exportBtn" type="button" disabled>Dışa aktar</button>
+        <button id="importBtn" type="button">İçe aktar…</button>
+      </div>
+      <input id="importFile" type="file" accept=".json,application/json" hidden>
+      <div id="cacheMessage" class="message" aria-live="polite"></div>
+    </section>
+  </main>
+
+  <script src="popup.js"></script>
+</body>
+</html>

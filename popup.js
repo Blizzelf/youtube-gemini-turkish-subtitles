@@ -1,0 +1,270 @@
+// Popup: kullanıcının Gemini API anahtarını chrome.storage.local'a kaydeder ve
+// çeviri önbelleğini gösterir/temizler (önbellek background.js'e aittir; mesajla istenir).
+// Kayıtlı anahtar input'a geri yazılmaz; yalnızca maskeli hali gösterilir.
+
+const STORAGE_KEY = "geminiApiKey";
+const CLEAR_CONFIRM_MS = 4000; // "Emin misiniz?" durumunun süresi
+const IMPORT_MAX_BYTES = 20 * 1024 * 1024;
+
+// İçe aktarma sekmede yapılır: popup'ta dosya seçme penceresi açılınca popup kapanabiliyor.
+const params = new URLSearchParams(location.search);
+const isTabView = params.get("view") === "tab";
+
+const els = {
+  status: document.getElementById("status"),
+  input: document.getElementById("apiKey"),
+  toggleBtn: document.getElementById("toggleBtn"),
+  saveBtn: document.getElementById("saveBtn"),
+  deleteBtn: document.getElementById("deleteBtn"),
+  message: document.getElementById("message"),
+  cacheStats: document.getElementById("cacheStats"),
+  clearCacheBtn: document.getElementById("clearCacheBtn"),
+  exportBtn: document.getElementById("exportBtn"),
+  importBtn: document.getElementById("importBtn"),
+  importFile: document.getElementById("importFile"),
+  cacheMessage: document.getElementById("cacheMessage"),
+};
+
+let clearConfirmTimer = null;
+
+function maskKey(key) {
+  return `${key.slice(0, 4)}••••${key.slice(-4)}`;
+}
+
+function showMessage(text, type) {
+  els.message.textContent = text;
+  els.message.className = `message ${type || ""}`.trim();
+}
+
+function renderStatus(key) {
+  if (key) {
+    els.status.textContent = `Anahtar kayıtlı (${maskKey(key)})`;
+    els.status.classList.add("saved");
+    els.deleteBtn.disabled = false;
+  } else {
+    els.status.textContent = "Anahtar yok";
+    els.status.classList.remove("saved");
+    els.deleteBtn.disabled = true;
+  }
+}
+
+function validateKey(key) {
+  if (!key) return "Lütfen bir API anahtarı girin.";
+  if (/\s/.test(key)) return "Anahtar boşluk içeremez.";
+  if (!key.startsWith("AIza")) return "Gemini API anahtarları \"AIza\" ile başlar.";
+  if (key.length < 30) return "Anahtar çok kısa görünüyor.";
+  return null;
+}
+
+async function loadStatus() {
+  try {
+    const result = await chrome.storage.local.get(STORAGE_KEY);
+    renderStatus(result[STORAGE_KEY] || null);
+  } catch (error) {
+    els.status.textContent = "Durum okunamadı";
+    showMessage(`Hata: ${error?.message || error}`, "error");
+  }
+}
+
+async function saveKey() {
+  const key = els.input.value.trim();
+  const validationError = validateKey(key);
+  if (validationError) {
+    showMessage(validationError, "error");
+    els.input.focus();
+    return;
+  }
+
+  els.saveBtn.disabled = true;
+  try {
+    await chrome.storage.local.set({ [STORAGE_KEY]: key });
+    els.input.value = "";
+    renderStatus(key);
+    showMessage("Anahtar kaydedildi.", "success");
+  } catch (error) {
+    showMessage(`Kaydedilemedi: ${error?.message || error}`, "error");
+  } finally {
+    els.saveBtn.disabled = false;
+  }
+}
+
+async function deleteKey() {
+  els.deleteBtn.disabled = true;
+  try {
+    await chrome.storage.local.remove(STORAGE_KEY);
+    renderStatus(null);
+    showMessage("Anahtar silindi.", "success");
+  } catch (error) {
+    els.deleteBtn.disabled = false;
+    showMessage(`Silinemedi: ${error?.message || error}`, "error");
+  }
+}
+
+function toggleVisibility() {
+  const hidden = els.input.type === "password";
+  els.input.type = hidden ? "text" : "password";
+  els.toggleBtn.textContent = hidden ? "Gizle" : "Göster";
+  els.toggleBtn.setAttribute("aria-label", hidden ? "Anahtarı gizle" : "Anahtarı göster");
+}
+
+// --- Çeviri önbelleği ---
+
+function formatBytes(bytes) {
+  const number = (value) => value.toLocaleString("tr-TR", { maximumFractionDigits: 1 });
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${number(bytes / 1024)} KB`;
+  return `${number(bytes / (1024 * 1024))} MB`;
+}
+
+function showCacheMessage(text, type) {
+  els.cacheMessage.textContent = text;
+  els.cacheMessage.className = `message ${type || ""}`.trim();
+}
+
+function resetClearButton() {
+  clearTimeout(clearConfirmTimer);
+  clearConfirmTimer = null;
+  els.clearCacheBtn.classList.remove("confirm");
+  els.clearCacheBtn.textContent = "Önbelleği temizle";
+}
+
+async function loadCacheStats() {
+  try {
+    const stats = await chrome.runtime.sendMessage({ type: "GET_CACHE_STATS" });
+    if (!stats?.ok) throw new Error(stats?.error || "yanıt yok");
+    els.cacheStats.textContent = stats.count
+      ? `${stats.count} video · ${formatBytes(stats.bytes)}`
+      : "Önbellekte çeviri yok";
+    els.clearCacheBtn.disabled = stats.count === 0;
+    els.exportBtn.disabled = stats.count === 0;
+  } catch (error) {
+    els.cacheStats.textContent = "Bilgi alınamadı";
+    els.clearCacheBtn.disabled = false;
+    els.exportBtn.disabled = false;
+    showCacheMessage(`Hata: ${error?.message || error}`, "error");
+  }
+}
+
+async function exportCache() {
+  els.exportBtn.disabled = true;
+  try {
+    const result = await chrome.runtime.sendMessage({ type: "EXPORT_TRANSLATION_CACHE" });
+    if (!result?.ok) throw new Error(result?.error || "yanıt yok");
+    if (!result.count) {
+      showCacheMessage("Dışa aktarılacak çeviri yok.");
+      return;
+    }
+
+    const blob = new Blob([JSON.stringify(result.data)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `yt-ceviri-onbellek-${new Date().toISOString().slice(0, 10)}.json`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    showCacheMessage(`${result.count} videonun çevirisi dışa aktarıldı (${formatBytes(blob.size)}).`, "success");
+  } catch (error) {
+    showCacheMessage(`Dışa aktarılamadı: ${error?.message || error}`, "error");
+  } finally {
+    els.exportBtn.disabled = false;
+  }
+}
+
+function startImport() {
+  if (isTabView) {
+    els.importFile.click();
+    return;
+  }
+  chrome.tabs.create({ url: chrome.runtime.getURL("popup.html?view=tab&import=1") });
+  window.close();
+}
+
+function describeImport(result) {
+  const parts = [`${result.imported} videonun çevirisi içe aktarıldı.`];
+  if (result.existing) parts.push(`${result.existing} video bu tarayıcıda zaten vardı.`);
+  if (result.incompatible) parts.push(`${result.incompatible} kayıt farklı sürüm veya modelle yapıldığı için atlandı.`);
+  if (result.invalid) parts.push(`${result.invalid} bozuk kayıt atlandı.`);
+  if (result.evicted) parts.push(`Yer açmak için en eski ${result.evicted} çeviri silindi.`);
+  return parts.join(" ");
+}
+
+async function importCache() {
+  const file = els.importFile.files[0];
+  els.importFile.value = "";
+  if (!file) return;
+
+  if (file.size > IMPORT_MAX_BYTES) {
+    showCacheMessage(`Dosya çok büyük (${formatBytes(file.size)}).`, "error");
+    return;
+  }
+
+  els.importBtn.disabled = true;
+  try {
+    let data;
+    try {
+      data = JSON.parse(await file.text());
+    } catch {
+      throw new Error("dosya geçerli JSON değil.");
+    }
+    const result = await chrome.runtime.sendMessage({ type: "IMPORT_TRANSLATION_CACHE", data });
+    if (!result?.ok) throw new Error(result?.error || "yanıt yok");
+    showCacheMessage(describeImport(result), result.imported ? "success" : "");
+  } catch (error) {
+    showCacheMessage(`İçe aktarılamadı: ${error?.message || error}`, "error");
+  } finally {
+    els.importBtn.disabled = false;
+  }
+  await loadCacheStats();
+}
+
+// İlk tıklama onay ister; geri alınamayan silme ikinci tıklamada yapılır.
+async function clearCache() {
+  if (!clearConfirmTimer) {
+    els.clearCacheBtn.classList.add("confirm");
+    els.clearCacheBtn.textContent = "Emin misiniz?";
+    showCacheMessage("Kayıtlı tüm çeviriler silinecek. Onaylamak için tekrar tıklayın.");
+    clearConfirmTimer = setTimeout(() => {
+      resetClearButton();
+      showCacheMessage("");
+    }, CLEAR_CONFIRM_MS);
+    return;
+  }
+
+  resetClearButton();
+  els.clearCacheBtn.disabled = true;
+  try {
+    const result = await chrome.runtime.sendMessage({ type: "CLEAR_TRANSLATION_CACHE" });
+    if (!result?.ok) throw new Error(result?.error || "yanıt yok");
+    let text = `${result.removed} videonun çevirisi silindi (${formatBytes(result.bytes)}).`;
+    if (result.activeJobs) text += ` Süren ${result.activeJobs} çeviri bitince yeniden kaydedilecek.`;
+    showCacheMessage(text, "success");
+  } catch (error) {
+    showCacheMessage(`Silinemedi: ${error?.message || error}`, "error");
+  }
+  await loadCacheStats();
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  els.saveBtn.addEventListener("click", saveKey);
+  els.deleteBtn.addEventListener("click", deleteKey);
+  els.toggleBtn.addEventListener("click", toggleVisibility);
+  els.input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") saveKey();
+  });
+  els.input.addEventListener("input", () => showMessage(""));
+  els.clearCacheBtn.addEventListener("click", clearCache);
+  els.exportBtn.addEventListener("click", exportCache);
+  els.importBtn.addEventListener("click", startImport);
+  els.importFile.addEventListener("change", importCache);
+
+  if (isTabView) {
+    document.body.classList.add("tab-view");
+    if (params.has("import")) {
+      showCacheMessage("Çeviri dosyasını seçmek için \"İçe aktar…\" butonuna tıklayın.");
+      els.importBtn.focus();
+    }
+  }
+
+  loadStatus();
+  loadCacheStats();
+});

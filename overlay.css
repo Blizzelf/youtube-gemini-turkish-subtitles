@@ -1,0 +1,98 @@
+/* YouTube Çeviri: oynatıcı üstündeki Türkçe altyazı ve kontrol düğmesi */
+
+.yt-ceviri-overlay {
+  position: absolute;
+  left: 50%;
+  /* Kontroller görünürken ilerleme çubuğunun üstü (overlay.js ölçer). */
+  bottom: var(--yt-ceviri-controls-offset, 70px);
+  z-index: 41;
+  width: max-content;
+  max-width: 80%;
+  transform: translateX(-50%);
+  text-align: center;
+  pointer-events: none;
+  transition: bottom 0.2s ease;
+}
+
+/* Kontroller gizliyken altyazı aşağı iner. */
+#movie_player.ytp-autohide .yt-ceviri-overlay {
+  bottom: 6%;
+}
+
+/* Reklam sırasında video zamanı reklama aittir; altyazı gösterilmez. */
+#movie_player.ad-showing .yt-ceviri-overlay,
+.yt-ceviri-overlay[hidden] {
+  display: none;
+}
+
+.yt-ceviri-text {
+  display: inline;
+  padding: 0.1em 0.45em;
+  border-radius: 4px;
+  background: rgba(8, 8, 8, 0.75);
+  color: #fff;
+  font-family: "YouTube Noto", Roboto, Arial, sans-serif;
+  font-size: var(--yt-ceviri-font-size, 20px);
+  line-height: 1.45;
+  white-space: pre-line;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+
+/* Overlay açıkken YouTube'un kendi altyazısı üst üste binmesin. */
+#movie_player.yt-ceviri-on .ytp-caption-window-container {
+  display: none !important;
+}
+
+/* Düğme kuralları #movie_player ile başlar; YouTube'un .ytp-button stillerini geçmek için. */
+#movie_player .yt-ceviri-button {
+  position: relative;
+  color: #fff;
+  font-family: Roboto, Arial, sans-serif;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-align: center;
+}
+
+#movie_player .yt-ceviri-button[hidden] {
+  display: none;
+}
+
+/* Açıkken altta kırmızı çizgi; yeni YouTube arayüzü ::after'ı varsayılan olarak gizler. */
+#movie_player .yt-ceviri-button[aria-pressed="true"]::after {
+  content: "";
+  display: block;
+  position: absolute;
+  left: 30%;
+  right: 30%;
+  bottom: 15%;
+  width: auto;
+  height: 3px;
+  border-radius: 3px;
+  background: #f00;
+  opacity: 1;
+  transform: none;
+}
+
+#movie_player .yt-ceviri-button[aria-pressed="false"] {
+  opacity: 0.7;
+}
+
+#movie_player .yt-ceviri-button.is-idle {
+  opacity: 0.5;
+}
+
+#movie_player .yt-ceviri-button.is-error {
+  color: #ff8a80;
+}
+
+#movie_player .yt-ceviri-button.is-loading {
+  animation: yt-ceviri-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes yt-ceviri-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}

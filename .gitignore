@@ -1,0 +1,14 @@
+# Popup'tan dışa aktarılan çeviri önbelleği dosyaları
+yt-ceviri-onbellek-*.json
+
+# Anahtar veya gizli bilgi içerebilecek yerel dosyalar
+.env
+.env.*
+*.pem
+*.crx
+
+# Bağımlılıklar ve sistem dosyaları
+node_modules/
+.DS_Store
+Thumbs.db
+desktop.ini
