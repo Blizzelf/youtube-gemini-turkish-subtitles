@@ -2,9 +2,10 @@
 // Extracts the video's original captions as a [{ start, duration, text }] array.
 //
 // Flow:
-// 0. Nothing is downloaded until the user clicks the TR button, except for videos translated
-//    before (complete in the cache, or still being translated), which are shown right away.
-//    The popup's auto-translate option starts every video without a click.
+// 0. Nothing is downloaded until the user turns on the "Türkçe altyazı" switch in the TR
+//    button's menu, except for videos translated before (complete in the cache, or still
+//    being translated), which are shown right away. The auto-translate option (menu or
+//    popup) starts every video without a click.
 // 1. captionTracks: read from the player (page-bridge.js), or failing that from the
 //    ytInitialPlayerResponse object in the page source.
 // 2. The original-language track is chosen and downloaded as json3. Auto-generated captions
@@ -54,7 +55,7 @@
   // Thrown with the reason when no token could be obtained; retried when CC is turned on.
   class TokenError extends Error {}
 
-  // Turkish subtitles over the player and the TR button (overlay.js).
+  // Turkish subtitles over the player, the TR button and its menu (overlay.js, menu.js).
   const overlay = new SubtitleOverlay();
 
   // --- Communication with the bridge (page-bridge.js) ---
@@ -352,7 +353,7 @@
     console.log(`${LOG_PREFIX} Translation JSON:`, result.translated);
     console.table(result.translated.slice(0, 15));
     exposeResult(result);
-    overlay.setCues(result.translated);
+    overlay.setCues(displayCues(result));
     overlay.setStatus("ready", "Türkçe altyazı");
   }
 
@@ -381,10 +382,22 @@
     return cues;
   }
 
+  // Every caption line for the overlay, with its translation (null until translated). The
+  // original is shown too in dual mode.
+  function displayCues(result) {
+    const texts = result.translatedTexts || [];
+    return result.captions.map((cue, i) => ({
+      start: cue.start,
+      duration: cue.duration,
+      original: cue.text,
+      text: typeof texts[i] === "string" ? texts[i] : null,
+    }));
+  }
+
   // Finished chunks are shown before the whole translation is done.
   function showPartialTranslation(result, statusText) {
     if (!isCurrent(result.videoId) || result.translated) return;
-    overlay.setCues(translatedCues(result));
+    overlay.setCues(displayCues(result));
     overlay.setStatus("loading", statusText);
   }
 
@@ -393,7 +406,7 @@
     if (isCurrent(result.videoId)) reportTranslation(result);
   }
 
-  // The TR button starts the translation; until then it only offers it.
+  // The menu's "Türkçe altyazı" switch starts the translation; until then it is only offered.
   function offerTranslation() {
     overlay.setStatus("available", "Türkçeye çevir");
   }
@@ -412,7 +425,8 @@
     }
     if (result.language.split("-")[0] === "tr") {
       console.log(`${LOG_PREFIX} Captions are already Turkish; translation skipped.`);
-      overlay.setCues(result.captions);
+      // There is no separate original to show in dual mode.
+      overlay.setCues(result.captions.map((cue) => ({ ...cue, original: null })));
       overlay.setStatus("ready", "Türkçe altyazı");
       return;
     }
@@ -433,7 +447,7 @@
 
       // The cached translation no longer matches the captions (e.g. new segmentation rules).
       if (response?.status === "not-cached") {
-        console.log(`${LOG_PREFIX} No usable cached translation; waiting for the TR button.`);
+        console.log(`${LOG_PREFIX} No usable cached translation; waiting for the user.`);
         if (isCurrent(result.videoId)) offerTranslation();
         return;
       }
@@ -442,7 +456,7 @@
         const error = response?.error || "bilinmeyen hata";
         console.warn(`${LOG_PREFIX} Translation could not start: ${error}`);
         if (isCurrent(result.videoId)) {
-          overlay.setCues(translatedCues(result));
+          overlay.setCues(displayCues(result));
           overlay.setStatus("error", `Çeviri başlatılamadı: ${error}`);
         }
         return;
@@ -546,13 +560,13 @@
       console.log(`${LOG_PREFIX} Translated before; loading: ${videoId}`);
       processVideo(videoId, { cacheOnly: true });
     } else {
-      console.log(`${LOG_PREFIX} Waiting for the TR button: ${videoId}`);
+      console.log(`${LOG_PREFIX} Waiting for the user to turn on the subtitles: ${videoId}`);
       offerTranslation();
     }
   }
 
-  // TR button: translate the current video, or retry after an error.
-  // Popup: translate it again with the selected model (retranslate).
+  // Menu switch: translate the current video, or retry after an error.
+  // Menu and popup: translate it again with the selected model (retranslate).
   function translateCurrentVideo(options) {
     if (!lastVideoId) return false;
     requestedVideos.add(lastVideoId);
@@ -562,6 +576,7 @@
   }
 
   overlay.onRequest = () => translateCurrentVideo();
+  overlay.onRetranslate = () => translateCurrentVideo({ retranslate: true });
 
   // Messages from the popup. The reply goes out right away; progress and errors show on the TR button.
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {

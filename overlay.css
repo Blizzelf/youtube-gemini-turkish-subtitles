@@ -1,4 +1,4 @@
-/* YouTube Çeviri: Turkish subtitles over the player and the control-bar button */
+/* YouTube Çeviri: subtitles over the player, the control-bar button and its menu */
 
 .yt-ceviri-overlay {
   position: absolute;
@@ -6,6 +6,10 @@
   /* While the controls are visible: just above the progress bar (measured by overlay.js). */
   bottom: var(--yt-ceviri-controls-offset, 70px);
   z-index: 41;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
   width: max-content;
   max-width: 80%;
   transform: translateX(-50%);
@@ -21,22 +25,48 @@
 
 /* During an ad the video time belongs to the ad; no subtitles are shown. */
 #movie_player.ad-showing .yt-ceviri-overlay,
-.yt-ceviri-overlay[hidden] {
+.yt-ceviri-overlay[hidden],
+.yt-ceviri-line[hidden] {
   display: none;
 }
 
+/* Dual mode: the original comes first unless the translation is set to be on top. */
+.yt-ceviri-overlay.translation-first .is-translation {
+  order: -1;
+}
+
+/* Each line's look comes from variables set by overlay.js (subtitle settings). */
 .yt-ceviri-text {
-  display: inline;
+  display: inline-block;
   padding: 0.1em 0.45em;
   border-radius: 4px;
-  background: rgba(8, 8, 8, 0.75);
-  color: #fff;
-  font-family: "YouTube Noto", Roboto, Arial, sans-serif;
-  font-size: var(--yt-ceviri-font-size, 20px);
+  background: var(--yt-ceviri-background, rgba(8, 8, 8, 0.75));
+  color: var(--yt-ceviri-color, #fff);
+  font-family: var(--yt-ceviri-font, "YouTube Noto", Roboto, Arial, sans-serif);
+  font-size: calc(var(--yt-ceviri-font-size, 20px) * var(--yt-ceviri-scale, 1));
+  font-weight: var(--yt-ceviri-weight, 400);
   line-height: 1.45;
   white-space: pre-line;
-  -webkit-box-decoration-break: clone;
-  box-decoration-break: clone;
+}
+
+.yt-ceviri-overlay.has-blur .yt-ceviri-text {
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+}
+
+/* Edges are black, so they stand out over the video when the background is (nearly) transparent. */
+.yt-ceviri-overlay.edge-shadow .yt-ceviri-text {
+  text-shadow: 0.06em 0.06em 0.12em #000, 0 0 0.35em rgba(0, 0, 0, 0.8);
+}
+
+.yt-ceviri-overlay.edge-outline .yt-ceviri-text {
+  text-shadow:
+    -0.06em -0.06em 0 #000, 0.06em -0.06em 0 #000, -0.06em 0.06em 0 #000, 0.06em 0.06em 0 #000,
+    0 -0.08em 0 #000, 0 0.08em 0 #000, -0.08em 0 0 #000, 0.08em 0 0 #000;
+}
+
+.yt-ceviri-overlay.edge-raised .yt-ceviri-text {
+  text-shadow: 0.03em 0.03em 0 #000, 0.06em 0.06em 0 #000, 0.09em 0.09em 0 rgba(0, 0, 0, 0.7);
 }
 
 /* Keep YouTube's own captions from overlapping while the overlay is on. */
@@ -83,8 +113,8 @@
   opacity: 0.5;
 }
 
-/* Not translated yet: the click starts the translation. */
-#movie_player .yt-ceviri-button.is-available:hover {
+#movie_player .yt-ceviri-button.is-available:hover,
+#movie_player .yt-ceviri-button[aria-expanded="true"] {
   opacity: 1;
 }
 
@@ -100,4 +130,303 @@
   50% {
     opacity: 0.35;
   }
+}
+
+/* --- Menu (menu.js); rules start with #movie_player to win over YouTube's player styles --- */
+
+#movie_player .yt-ceviri-menu {
+  position: absolute;
+  right: 12px;
+  bottom: 60px;
+  z-index: 72;
+  box-sizing: border-box;
+  width: 310px;
+  max-width: calc(100% - 24px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 8px 0;
+  border-radius: 12px;
+  background: rgba(28, 28, 28, 0.94);
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  color: #eee;
+  font-family: Roboto, Arial, sans-serif;
+  font-size: 13px;
+  line-height: 1.35;
+  text-align: left;
+  color-scheme: dark;
+  cursor: default;
+  scrollbar-color: rgba(255, 255, 255, 0.3) transparent;
+  scrollbar-width: thin;
+}
+
+#movie_player .yt-ceviri-menu[hidden] {
+  display: none;
+}
+
+#movie_player .yt-ceviri-menu button {
+  margin: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+#movie_player .yt-ceviri-menu-item,
+#movie_player .yt-ceviri-menu-option {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 40px;
+  padding: 7px 16px;
+  text-align: left;
+}
+
+#movie_player .yt-ceviri-menu-item:hover,
+#movie_player .yt-ceviri-menu-option:hover,
+#movie_player .yt-ceviri-menu button:focus-visible {
+  background: rgba(255, 255, 255, 0.1);
+  outline: none;
+}
+
+#movie_player .yt-ceviri-menu-item:disabled {
+  opacity: 0.45;
+  background: none;
+  cursor: default;
+}
+
+#movie_player .yt-ceviri-menu-icon {
+  flex: none;
+  width: 22px;
+  height: 22px;
+}
+
+#movie_player .yt-ceviri-menu-icon path {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+#movie_player .yt-ceviri-menu-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+#movie_player .yt-ceviri-menu-label {
+  font-size: 14px;
+}
+
+#movie_player .yt-ceviri-menu-sub {
+  display: -webkit-box;
+  overflow: hidden;
+  color: #aaa;
+  font-size: 12px;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+#movie_player .yt-ceviri-menu-sub:empty {
+  display: none;
+}
+
+#movie_player .yt-ceviri-menu-item.is-confirm .yt-ceviri-menu-sub {
+  color: #ffb4ab;
+}
+
+#movie_player .yt-ceviri-menu-value {
+  color: #ccc;
+  white-space: nowrap;
+}
+
+#movie_player .yt-ceviri-menu-chevron {
+  margin-left: -6px;
+  color: #aaa;
+  font-size: 20px;
+  line-height: 1;
+}
+
+#movie_player .yt-ceviri-menu-divider {
+  height: 1px;
+  margin: 6px 0;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+#movie_player .yt-ceviri-switch {
+  position: relative;
+  flex: none;
+  width: 34px;
+  height: 18px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.3);
+  transition: background 0.15s;
+}
+
+#movie_player .yt-ceviri-switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 0.15s;
+}
+
+#movie_player .yt-ceviri-switch.is-on {
+  background: #f00;
+}
+
+#movie_player .yt-ceviri-switch.is-on::after {
+  transform: translateX(16px);
+}
+
+#movie_player .yt-ceviri-menu-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  padding: 0 10px 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+#movie_player .yt-ceviri-menu-back {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  font-size: 24px;
+  line-height: 1;
+}
+
+#movie_player .yt-ceviri-menu-title {
+  flex: 1;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+#movie_player .yt-ceviri-menu-action {
+  padding: 4px 8px;
+  border-radius: 6px;
+  color: #bbb;
+  font-size: 12px;
+}
+
+#movie_player .yt-ceviri-menu-check {
+  flex: none;
+  width: 22px;
+  text-align: center;
+}
+
+#movie_player .yt-ceviri-menu-note {
+  margin: 6px 16px 2px;
+  color: #999;
+  font-size: 12px;
+}
+
+#movie_player .yt-ceviri-menu-section {
+  padding: 2px 12px 8px;
+}
+
+#movie_player .yt-ceviri-menu-section-title {
+  padding: 6px 4px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+#movie_player .yt-ceviri-menu-section-note {
+  margin-left: 6px;
+  color: #999;
+  font-size: 11px;
+  font-weight: 400;
+}
+
+#movie_player .yt-ceviri-menu-card {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+#movie_player .yt-ceviri-menu-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 38px;
+  padding: 3px 10px;
+}
+
+#movie_player .yt-ceviri-menu-row + .yt-ceviri-menu-row {
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+#movie_player .yt-ceviri-stepper {
+  display: flex;
+  align-items: center;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+#movie_player .yt-ceviri-stepper button {
+  width: 28px;
+  height: 26px;
+  border-radius: 6px;
+  font-size: 15px;
+}
+
+#movie_player .yt-ceviri-stepper-value {
+  min-width: 44px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+#movie_player .yt-ceviri-swatch {
+  position: relative;
+  overflow: hidden;
+  width: 36px;
+  height: 22px;
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+#movie_player .yt-ceviri-swatch input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+#movie_player .yt-ceviri-select {
+  max-width: 150px;
+  padding: 4px 6px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 6px;
+  background: #2a2a2a;
+  color: #eee;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+#movie_player .yt-ceviri-select option {
+  background: #2a2a2a;
+  color: #eee;
+}
+
+#movie_player .yt-ceviri-switch-button {
+  display: flex;
+  padding: 4px;
+  border-radius: 12px;
 }

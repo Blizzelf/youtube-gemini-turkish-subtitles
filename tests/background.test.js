@@ -72,6 +72,7 @@ function makeGemini(behavior = () => null, { latencyMs = 5 } = {}) {
 
 function makeContext({ gemini, storage = makeStorage({ geminiApiKey: "AIzaTESTKEY" }), session = makeStorage(), cacheMaxBytes } = {}) {
   const sent = [];
+  const opened = [];
   const ctx = {
     console: { log() {}, warn() {}, error() {} },
     setTimeout, clearTimeout, setInterval, clearInterval, URL, TextEncoder, structuredClone,
@@ -83,16 +84,20 @@ function makeContext({ gemini, storage = makeStorage({ geminiApiKey: "AIzaTESTKE
         onMessage: { addListener(fn) { ctx.__listener = fn; } },
         getManifest: () => ({ version: "0.1.0" }),
         getPlatformInfo: async () => ({}),
+        getURL: (path) => `chrome-extension://ext/${path}`,
       },
       storage: { local: storage, session },
-      tabs: { sendMessage: async (tabId, message) => { sent.push(JSON.parse(JSON.stringify(message))); } },
+      tabs: {
+        sendMessage: async (tabId, message) => { sent.push(JSON.parse(JSON.stringify(message))); },
+        create: async ({ url }) => { opened.push(url); },
+      },
     },
   };
   vm.createContext(ctx);
   vm.runInContext(patched({ cacheMaxBytes }), ctx);
   const send = (message, tabId = 7) =>
     new Promise((resolve) => ctx.__listener(message, { id: "ext", tab: { id: tabId }, frameId: 0 }, (r) => resolve(JSON.parse(JSON.stringify(r)))));
-  return { ctx, sent, storage, session, send };
+  return { ctx, sent, opened, storage, session, send };
 }
 
 async function waitFor(predicate, timeoutMs = 3000) {
@@ -618,6 +623,12 @@ test("import: the oldest entries are removed when the cache budget is exceeded",
   const stats = await send({ type: "GET_CACHE_STATS" });
   assert.strictEqual(stats.count, 5 - result.evicted);
   assert.ok(stats.bytes <= 800);
+});
+
+test("OPEN_SETTINGS opens the popup page in a tab", async () => {
+  const { opened, send } = makeContext({ gemini: makeGemini() });
+  assert.strictEqual((await send({ type: "OPEN_SETTINGS" })).ok, true);
+  assert.deepStrictEqual(opened, ["chrome-extension://ext/popup.html?view=tab"]);
 });
 
 test("invalid data is rejected", async () => {

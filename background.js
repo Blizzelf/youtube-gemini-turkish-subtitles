@@ -841,6 +841,11 @@ async function handleMessage(message, sender) {
     case "TRANSLATE":
       return handleTranslate(message, sender);
 
+    // Menu on the player: "Daha fazla ayar" opens the popup page in a tab.
+    case "OPEN_SETTINGS":
+      await chrome.tabs.create({ url: chrome.runtime.getURL("popup.html?view=tab") });
+      return { ok: true };
+
     // Popup: cache info and clearing.
     case "GET_CACHE_STATS":
       return { ok: true, ...(await getCacheStats()), activeJobs: jobs.size };
