@@ -112,15 +112,15 @@ const types = (sent) => sent.map((m) => m.type);
 const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
 
-test("batching: 100 lines -> 40/40/20", async () => {
+test("batching: 100 lines -> 10/40/40/10 (small first chunk at the playback position)", async () => {
   const gemini = makeGemini();
   const { sent, send } = makeContext({ gemini });
   const ack = await send(translate("v1", cues(100)));
   assert.strictEqual(ack.status, "started");
-  assert.deepStrictEqual([ack.done, ack.total], [0, 3]);
+  assert.deepStrictEqual([ack.done, ack.total], [0, 4]);
   await waitFor(() => sent.some((m) => m.type === "TRANSLATION_RESULT"));
 
-  assert.deepStrictEqual(gemini.calls.map((c) => c.chunk.length), [40, 40, 20]);
+  assert.deepStrictEqual(gemini.calls.map((c) => c.chunk.length), [10, 40, 40, 10]);
   assert.ok(gemini.calls[0].url.includes("gemini-3.8-flash:generateContent"));
   assert.strictEqual(gemini.calls[0].headers["x-goog-api-key"], "AIzaTESTKEY");
 });
@@ -131,13 +131,23 @@ test("parallel: at most 3 requests in flight, starts spaced by the interval", as
   await send(translate("v1", cues(200)));
   await waitFor(() => sent.some((m) => m.type === "TRANSLATION_RESULT"));
 
-  assert.strictEqual(gemini.calls.length, 5);
+  assert.strictEqual(gemini.calls.length, 6); // 10, 40, 40, 40, 40, 30 lines
   assert.strictEqual(gemini.maxInFlight, 3);
   // The gap is kept between slot grants; fetch is called a moment later, hence 2 ms of slack.
   for (let i = 1; i < gemini.calls.length; i++) {
     assert.ok(gemini.calls[i].at - gemini.calls[i - 1].at >= INTERVAL_MS - 2, `start gap: ${gemini.calls[i].at - gemini.calls[i - 1].at} ms`);
   }
   assert.strictEqual(sent.at(-1).texts.filter((t) => t === null).length, 0);
+});
+
+test("first chunk: 10 lines starting at the line playing now", async () => {
+  const gemini = makeGemini();
+  const { sent, send } = makeContext({ gemini });
+  // Lines start every 2 s; at 100.5 s line 50 (100-101.5 s) is playing.
+  const ack = await send(translate("v1", cues(100), { currentTime: 100.5 }));
+  assert.deepStrictEqual([ack.done, ack.total], [0, 4]);
+  await waitFor(() => sent.some((m) => m.type === "TRANSLATION_RESULT"));
+  assert.deepStrictEqual(gemini.calls.map((c) => [c.chunk[0].text, c.chunk.length]), [["line 50", 10], ["line 60", 40], ["line 0", 40], ["line 40", 10]]);
 });
 
 test("batching: long lines are split by the character limit", async () => {
@@ -153,9 +163,9 @@ test("progressive delivery: CHUNK messages in order, then RESULT; no timestamps 
   const { sent, send } = makeContext({ gemini });
   await send(translate("v1", cues(100)));
   await waitFor(() => sent.some((m) => m.type === "TRANSLATION_RESULT"));
-  assert.deepStrictEqual(types(sent), ["TRANSLATION_CHUNK", "TRANSLATION_CHUNK", "TRANSLATION_CHUNK", "TRANSLATION_RESULT"]);
-  assert.deepStrictEqual(sent.slice(0, 3).map((m) => [m.startIndex, m.done, m.total, m.texts.length]), [[0, 1, 3, 40], [40, 2, 3, 40], [80, 3, 3, 20]]);
-  const result = sent[3];
+  assert.deepStrictEqual(types(sent), ["TRANSLATION_CHUNK", "TRANSLATION_CHUNK", "TRANSLATION_CHUNK", "TRANSLATION_CHUNK", "TRANSLATION_RESULT"]);
+  assert.deepStrictEqual(sent.slice(0, 4).map((m) => [m.startIndex, m.done, m.total, m.texts.length]), [[0, 1, 4, 10], [10, 2, 4, 40], [50, 3, 4, 40], [90, 4, 4, 10]]);
+  const result = sent[4];
   assert.strictEqual(result.videoId, "v1");
   assert.strictEqual(result.texts.length, 100);
   assert.strictEqual(result.texts[99], "TR line 99");
@@ -286,7 +296,7 @@ test("429: the queue keeps the slower gap after a rate limit", async () => {
   const { sent, send } = makeContext({ gemini });
   await send(translate("v1", cues(100)));
   await waitFor(() => sent.some((m) => m.type === "TRANSLATION_RESULT"));
-  assert.strictEqual(gemini.calls.length, 4);
+  assert.strictEqual(gemini.calls.length, 5);
   const gaps = gemini.calls.slice(2).map((c, i) => c.at - gemini.calls[i + 1].at);
   assert.ok(gaps.every((gap) => gap >= SLOW_INTERVAL_MS), gaps.join(","));
 });
@@ -337,29 +347,32 @@ test("an interrupted translation is saved and resumes where it stopped", async (
   assert.strictEqual(gemini.calls.length, 2, "the queued third chunk must not be sent after the error");
   const entry = storage.data["translation:v1"];
   assert.strictEqual(entry.complete, false);
-  assert.strictEqual(entry.texts.filter((t) => t !== null).length, 40);
+  assert.strictEqual(entry.texts.filter((t) => t !== null).length, 10);
 
   failSecond = false;
   const callsBefore = gemini.calls.length;
   const second = makeContext({ gemini, storage });
-  const ack = await second.send(translate("v1", cues(100)));
+  // Resumed at 160 s (line 80). Lines 0-9 form their own done chunk and are not sent again:
+  // chunks 0-9 (done), 10-49, 50-79, 80-89 (small, playback position), 90-99.
+  const ack = await second.send(translate("v1", cues(100), { currentTime: 160 }));
   assert.strictEqual(ack.status, "resumed");
-  assert.deepStrictEqual([ack.done, ack.total], [1, 3]);
-  assert.strictEqual(ack.texts.filter((t) => t !== null).length, 40);
+  assert.deepStrictEqual([ack.done, ack.total], [1, 5]);
+  assert.strictEqual(ack.texts.filter((t) => t !== null).length, 10);
   await waitFor(() => second.sent.some((m) => m.type === "TRANSLATION_RESULT"));
-  assert.deepStrictEqual(gemini.calls.slice(callsBefore).map((c) => c.chunk[0].text), ["line 40", "line 80"]);
+  assert.deepStrictEqual(gemini.calls.slice(callsBefore).map((c) => c.chunk[0].text), ["line 80", "line 90", "line 10", "line 50"]);
   assert.strictEqual(storage.data["translation:v1"].complete, true);
 });
 
 test("priority: the chunk at the playback position goes first; seeking moves the new position up", async () => {
   const gemini = makeGemini(undefined, { latencyMs: 100 });
   const { sent, send } = makeContext({ gemini });
-  // 320 lines, 2 s apart: 8 chunks starting at 0, 80, 160, ... 560 s. Three are claimed at once.
+  // 320 lines, 2 s apart. Chunks start at 0, 80, 100 (10 lines, the playback position), 120,
+  // 200, 280, 360, 440, 520 and 600 s. Three are claimed at once.
   await send(translate("v1", cues(320), { currentTime: 100 }));
   await waitFor(() => gemini.calls.length >= 1);
   await send({ type: "TRANSLATION_PRIORITY", videoId: "v1", time: 500 });
   await waitFor(() => sent.some((m) => m.type === "TRANSLATION_RESULT"));
-  assert.deepStrictEqual(gemini.calls.map((c) => c.chunk[0].start), [80, 160, 240, 480, 560, 0, 320, 400]);
+  assert.deepStrictEqual(gemini.calls.map((c) => c.chunk[0].start), [100, 120, 200, 440, 520, 600, 0, 80, 280, 360]);
 });
 
 test("the same video requested from two tabs runs one job and both tabs get the result", async () => {

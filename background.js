@@ -5,7 +5,9 @@
 // Translation flow:
 // 1. Cache: if the video was fully translated before, the API is not called at all. If a
 //    translation was interrupted, the finished part is sent right away and work resumes.
-// 2. Batching: captions are split into chunks of at most 40 lines / 6000 characters.
+// 2. Batching: captions are split into chunks of at most 40 lines / 6000 characters. The
+//    first untranslated chunk at the playback position has only 10 lines, so the first
+//    subtitles appear quickly.
 // 3. Queue: all Gemini requests (for every tab) share one queue. Up to 3 run at once and
 //    starts are at least 0.5 s apart. After the first 429 (e.g. on the free tier) it drops to
 //    one request at a time, 2.5 s apart, until the browser closes. On 429 the queue pauses
@@ -23,6 +25,7 @@ const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models
 
 // Batching
 const CHUNK_MAX_ITEMS = 40;
+const FIRST_CHUNK_ITEMS = 10; // Chunk at the playback position; translated first, and faster
 const CHUNK_MAX_CHARS = 6000; // Caption text + JSON fields; stays well below the token limit
 const CHUNK_FIELD_CHARS = 40; // Rough allowance for a line's start/duration fields
 const MAX_CUES = 5000;
@@ -355,14 +358,26 @@ async function translateChunk(apiKey, chunk, job) {
 
 // --- Batching ---
 
-// Splits the caption array into [start, end) ranges by line and character limits.
-function createChunks(captions) {
+// First untranslated line at or after the playback position (the line playing now included);
+// if everything after it is done, the first untranslated line. -1 when nothing is left.
+function firstPendingIndex(captions, texts, time) {
+  const index = captions.findIndex((cue, i) => texts[i] === null && cue.start + cue.duration >= time);
+  return index !== -1 ? index : texts.indexOf(null);
+}
+
+// Splits the caption array into [start, end) ranges by line and character limits. A chunk never
+// mixes translated and untranslated lines, so an interrupted job resumes without redoing any.
+// The chunk at firstIndex is cut to FIRST_CHUNK_ITEMS lines.
+function createChunks(captions, texts, firstIndex) {
   const chunks = [];
   let start = 0;
   let chars = 0;
   captions.forEach((cue, i) => {
     const size = cue.text.length + CHUNK_FIELD_CHARS;
-    if (i > start && (i - start >= CHUNK_MAX_ITEMS || chars + size > CHUNK_MAX_CHARS)) {
+    const boundary =
+      (texts[i] === null) !== (texts[i - 1] === null) ||
+      (firstIndex >= 0 && (i === firstIndex || i === firstIndex + FIRST_CHUNK_ITEMS));
+    if (i > start && (boundary || i - start >= CHUNK_MAX_ITEMS || chars + size > CHUNK_MAX_CHARS)) {
       chunks.push({ start, end: i });
       start = i;
       chars = 0;
@@ -643,7 +658,7 @@ function startJob({ apiKey, key, videoId, title, captions, hash, texts, priority
     hash,
     texts,
     priorityTime,
-    chunks: createChunks(captions),
+    chunks: createChunks(captions, texts, firstPendingIndex(captions, texts, priorityTime)),
     inFlight: new Set(), // Chunks a worker is translating
     error: null, // First error; stops the job
     targets: new Set([target]),
