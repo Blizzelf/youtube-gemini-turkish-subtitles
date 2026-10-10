@@ -12,7 +12,7 @@
 A Chrome / Edge extension (Manifest V3) that translates YouTube captions into Turkish with Google Gemini and shows them as subtitles on the video.
 
 <p align="center">
-  <img src="docs/images/player.webp" width="800" alt="Turkish subtitles and the extension's menu on a YouTube video">
+  <img src="docs/images/player.webp" width="800" alt="Dual-mode subtitles on a YouTube video: the original line with the spoken word highlighted, the Turkish translation below it, and the extension's menu">
 </p>
 
 > [Türkçe açıklama aşağıda.](#türkçe)
