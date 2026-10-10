@@ -8,7 +8,7 @@ A Chrome / Edge extension (Manifest V3) that translates YouTube captions into Tu
 
 - **Original captions:** Reads the video's own caption track in its original language: manual captions when available, otherwise the auto-generated ones. Handles AI-dubbed videos that have one auto-generated track per audio language.
 - **Sentence-aware segmentation:** YouTube's auto-generated captions break lines by screen width, often mid-sentence. The extension regroups words into sentences using word-level timings, so the translation does not drift into the neighboring line.
-- **Gemini translation:** Translates in chunks of up to 40 lines with `gemini-3.8-flash`, or the cheaper `gemini-2.5-flash` chosen in the popup; the first chunk at the playback position has only 10 lines, so the first subtitles appear within a few seconds. The same happens after seeking to an untranslated part. The model is told to keep the `start` / `duration` structure, and the code checks every response. Timestamps always come from the original captions; only the text is taken from the model.
+- **Gemini translation:** Translates in chunks of up to 40 lines with `gemini-2.5-flash` by default, or `gemini-3.8-flash` for better translations, chosen in the popup; the first chunk at the playback position has only 10 lines, so the first subtitles appear within a few seconds. The same happens after seeking to an untranslated part. The model is told to keep the `start` / `duration` structure, and the code checks every response. Timestamps always come from the original captions; only the text is taken from the model.
 - **Fast but rate-limit friendly:** Up to 3 chunks are translated at once, with request starts 0.5 s apart. After the first `429` (for example on the free tier) the queue drops to one request at a time, 2.5 s apart, until the browser is closed. On `429` the queue pauses and retries with exponential backoff (honoring `RetryInfo`). A used-up daily quota is reported instead of retried.
 - **Progressive display:** Each chunk appears on screen as soon as it is translated, starting at the current playback position. Seeking moves the new position to the front of the queue.
 - **Cache:** Translations are stored in `chrome.storage.local` by video ID. Reopening a video loads instantly without calling the API, even after switching models. Interrupted translations resume where they stopped. The cache is limited to 8 MB and removes the least recently used entries first.
@@ -31,7 +31,7 @@ Requires Chrome / Edge 111 or newer.
 
 Open a YouTube video that has captions and click the **TR** button next to the CC button. The button pulses while the translation is prepared, and Turkish subtitles appear as chunks finish. After that, click **TR** to hide or show them; while they are on, YouTube's own captions are hidden. If something fails before any subtitle appears (for example a missing API key), click **TR** again to retry.
 
-Videos you translated before show their subtitles without a click. To translate every video as soon as it opens, turn on **Videoları otomatik çevir** in the popup.
+Videos you translated before show their subtitles without a click. To translate one again with the other model, open it and click **Bu videoyu yeniden çevir** in the popup. To translate every video as soon as it opens, turn on **Videoları otomatik çevir** in the popup.
 
 The popup also shows how many videos are cached. You can clear the cache or export and import it there.
 
@@ -44,7 +44,7 @@ The popup also shows how many videos are cached. You can clear the cache or expo
 | `segmenter.js` | Regroups auto-generated captions into sentences and splits long ones at natural points. |
 | `background.js` | Service worker. Owns the API key, the request queue, retries, and the cache. |
 | `overlay.js`, `overlay.css` | Draws the subtitles over the player and the **TR** button. |
-| `popup.html`, `popup.js` | API key, model, auto-translate option, cache stats, clear, export and import. |
+| `popup.html`, `popup.js` | API key, model, re-translating the open video, auto-translate option, cache stats, clear, export and import. |
 
 ## Privacy
 
@@ -84,7 +84,7 @@ YouTube altyazılarını Google Gemini ile Türkçeye çevirip videonun üstünd
 **Öne çıkanlar:**
 - Oynatıcıdaki **TR** butonuna tıkladığınız videoyu çevirir; daha önce çevrilen videolar kendiliğinden yüklenir. İsterseniz popup'tan her videoyu otomatik çevirmeyi açabilirsiniz.
 - Videonun orijinal dildeki altyazısını alır. Otomatik altyazıyı, çeviride anlam kaymasın diye cümlelere göre yeniden böler.
-- `gemini-3.8-flash` ile (popup'tan daha ucuz `gemini-2.5-flash` de seçilebilir) parça parça çevirir. Zaman damgaları her zaman orijinalden alınır.
+- Varsayılan olarak `gemini-2.5-flash` ile parça parça çevirir; daha iyi çeviri için popup'tan `gemini-3.8-flash` seçilebilir. Önceden çevrilmiş bir video popup'taki **Bu videoyu yeniden çevir** butonuyla seçili modelle baştan çevrilebilir. Zaman damgaları her zaman orijinalden alınır.
 - Hız sınırına (429) takılınca bekleyip tekrar dener. Çevrilen parçalar hemen ekranda görünür.
 - Çeviriler tarayıcıda saklanır. Aynı video tekrar açılınca API'ye gitmeden anında yüklenir.
 - Çevirileri tarayıcılar arasında dosya ile taşıyabilirsiniz (dışa / içe aktar).

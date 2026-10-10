@@ -26,7 +26,7 @@ const MODELS = {
   "gemini-3.8-flash": { thinkingConfig: { thinkingLevel: "low" } },
   "gemini-2.5-flash": { thinkingConfig: { thinkingBudget: 0 } },
 };
-const DEFAULT_MODEL = "gemini-3.8-flash";
+const DEFAULT_MODEL = "gemini-2.5-flash";
 const MODEL_KEY = "geminiModel";
 const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 
@@ -766,6 +766,9 @@ async function handleTranslate(message, sender) {
   // If the same video is already being translated, this tab receives the results too; the
   // finished part is sent immediately.
   const running = jobs.get(key);
+  if (running && message.retranslate) {
+    return { ok: false, error: "Bu videonun çevirisi sürüyor; bitince yeniden çevirebilirsiniz." };
+  }
   if (running) {
     running.targets.add(target);
     setPriority(running, priorityTime);
@@ -782,8 +785,9 @@ async function handleTranslate(message, sender) {
 }
 
 async function startOrLoadTranslation({ message, videoId, captions, hash, key, target, priorityTime }) {
-  // 1) Cache: a complete translation needs no API call (and no key).
-  const cached = await readTranslation(videoId, hash, captions.length);
+  // 1) Cache: a complete translation needs no API call (and no key). Re-translating (popup)
+  // starts from scratch with the selected model; the new texts replace the old entry chunk by chunk.
+  const cached = message.retranslate ? null : await readTranslation(videoId, hash, captions.length);
   if (cached?.complete) {
     touchTranslation(videoId);
     console.log(`${LOG_PREFIX} Loaded from cache: videoId=${videoId}, ${captions.length} lines`);

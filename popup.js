@@ -1,6 +1,7 @@
 // Popup: saves the user's Gemini API key, the model and the auto-translate option to
-// chrome.storage.local, and shows, clears, exports and imports the translation cache (the cache
-// belongs to background.js; requested by message).
+// chrome.storage.local, re-translates the video open in the active tab (via its content script),
+// and shows, clears, exports and imports the translation cache (the cache belongs to
+// background.js; requested by message).
 // The saved key is never written back into the input; only a masked form is shown.
 // All strings in this file are shown to the user, so they are Turkish.
 
@@ -22,6 +23,9 @@ const els = {
   deleteBtn: document.getElementById("deleteBtn"),
   message: document.getElementById("message"),
   model: document.getElementById("model"),
+  retranslateBtn: document.getElementById("retranslateBtn"),
+  retranslateInfo: document.getElementById("retranslateInfo"),
+  retranslateMessage: document.getElementById("retranslateMessage"),
   autoTranslate: document.getElementById("autoTranslate"),
   cacheStats: document.getElementById("cacheStats"),
   clearCacheBtn: document.getElementById("clearCacheBtn"),
@@ -32,6 +36,7 @@ const els = {
 };
 
 let clearConfirmTimer = null;
+let videoTabId = null; // Active tab, when it shows a YouTube video
 
 function maskKey(key) {
   return `${key.slice(0, 4)}••••${key.slice(-4)}`;
@@ -129,6 +134,41 @@ async function saveModel() {
     await chrome.storage.local.set({ [MODEL_KEY]: els.model.value });
   } catch (error) {
     showMessage(`Ayar kaydedilemedi: ${error?.message || error}`, "error");
+  }
+}
+
+// --- Re-translate the open video with the selected model ---
+
+function showRetranslateMessage(text, type) {
+  els.retranslateMessage.textContent = text;
+  els.retranslateMessage.className = `message ${type || ""}`.trim();
+}
+
+// Only the content script knows the video; on other pages the message has no receiver and fails.
+async function loadCurrentVideo() {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    const video = await chrome.tabs.sendMessage(tab.id, { type: "GET_VIDEO" });
+    if (!video?.videoId) throw new Error("no video");
+    videoTabId = tab.id;
+    els.retranslateBtn.disabled = false;
+    els.retranslateInfo.textContent = video.title ? `Açık video: ${video.title}` : "";
+    els.retranslateInfo.title = video.title || "";
+  } catch {
+    els.retranslateBtn.disabled = true;
+    els.retranslateInfo.textContent = "YouTube'da bir video açıkken kullanılabilir.";
+  }
+}
+
+async function retranslate() {
+  els.retranslateBtn.disabled = true;
+  try {
+    const result = await chrome.tabs.sendMessage(videoTabId, { type: "RETRANSLATE" });
+    if (!result?.ok) throw new Error(result?.error || "yanıt yok");
+    showRetranslateMessage("Yeniden çeviri başladı. İlerlemeyi videodaki TR butonunda görebilirsiniz.", "success");
+  } catch (error) {
+    showRetranslateMessage(`Başlatılamadı: ${error?.message || error}`, "error");
+    els.retranslateBtn.disabled = false;
   }
 }
 
@@ -298,6 +338,7 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   els.input.addEventListener("input", () => showMessage(""));
   els.model.addEventListener("change", saveModel);
+  els.retranslateBtn.addEventListener("click", retranslate);
   els.autoTranslate.addEventListener("change", saveAutoTranslate);
   els.clearCacheBtn.addEventListener("click", clearCache);
   els.exportBtn.addEventListener("click", exportCache);
@@ -314,6 +355,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   loadStatus();
   loadModel();
+  loadCurrentVideo();
   loadAutoTranslate();
   loadCacheStats();
 });

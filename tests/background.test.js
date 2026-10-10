@@ -121,7 +121,7 @@ test("batching: 100 lines -> 10/40/40/10 (small first chunk at the playback posi
   await waitFor(() => sent.some((m) => m.type === "TRANSLATION_RESULT"));
 
   assert.deepStrictEqual(gemini.calls.map((c) => c.chunk.length), [10, 40, 40, 10]);
-  assert.ok(gemini.calls[0].url.includes("gemini-3.8-flash:generateContent"));
+  assert.ok(gemini.calls[0].url.includes("gemini-2.5-flash:generateContent"));
   assert.strictEqual(gemini.calls[0].headers["x-goog-api-key"], "AIzaTESTKEY");
 });
 
@@ -152,24 +152,24 @@ test("first chunk: 10 lines starting at the line playing now", async () => {
 
 test("model: the model chosen in the popup is used, with its own thinking setting", async () => {
   const gemini = makeGemini();
-  const storage = makeStorage({ geminiApiKey: "k", geminiModel: "gemini-2.5-flash" });
+  const storage = makeStorage({ geminiApiKey: "k", geminiModel: "gemini-3.8-flash" });
   const { sent, send } = makeContext({ gemini, storage });
   await send(translate("v1", cues(10)));
   await waitFor(() => sent.some((m) => m.type === "TRANSLATION_RESULT"));
-  assert.ok(gemini.calls[0].url.endsWith("/gemini-2.5-flash:generateContent"), gemini.calls[0].url);
-  assert.deepStrictEqual(gemini.calls[0].body.generationConfig.thinkingConfig, { thinkingBudget: 0 });
-  assert.strictEqual(storage.data["translation:v1"].model, "gemini-2.5-flash");
+  assert.ok(gemini.calls[0].url.endsWith("/gemini-3.8-flash:generateContent"), gemini.calls[0].url);
+  assert.deepStrictEqual(gemini.calls[0].body.generationConfig.thinkingConfig, { thinkingLevel: "low" });
+  assert.strictEqual(storage.data["translation:v1"].model, "gemini-3.8-flash");
 
   storage.data.geminiModel = "toString"; // Unknown values fall back to the default model
   await send(translate("v2", cues(10)));
   await waitFor(() => sent.filter((m) => m.type === "TRANSLATION_RESULT").length === 2);
-  assert.ok(gemini.calls[1].url.endsWith("/gemini-3.8-flash:generateContent"), gemini.calls[1].url);
-  assert.deepStrictEqual(gemini.calls[1].body.generationConfig.thinkingConfig, { thinkingLevel: "low" });
+  assert.ok(gemini.calls[1].url.endsWith("/gemini-2.5-flash:generateContent"), gemini.calls[1].url);
+  assert.deepStrictEqual(gemini.calls[1].body.generationConfig.thinkingConfig, { thinkingBudget: 0 });
 });
 
 test("model: translations made with another model are kept after switching", async () => {
   const gemini = makeGemini();
-  const storage = makeStorage({ geminiApiKey: "k", geminiModel: "gemini-2.5-flash" });
+  const storage = makeStorage({ geminiApiKey: "k", geminiModel: "gemini-3.8-flash" });
   const { sent, send } = makeContext({ gemini, storage });
   await send(translate("v1", cues(10)));
   await waitFor(() => sent.some((m) => m.type === "TRANSLATION_RESULT"));
@@ -179,6 +179,35 @@ test("model: translations made with another model are kept after switching", asy
   const ack = await send(translate("v1", cues(10)));
   assert.strictEqual(ack.status, "cached");
   assert.strictEqual(gemini.calls.length, calls);
+});
+
+test("retranslate: ignores the cache and translates again with the selected model", async () => {
+  const gemini = makeGemini();
+  const storage = makeStorage({ geminiApiKey: "k" });
+  const { sent, send } = makeContext({ gemini, storage });
+  await send(translate("v1", cues(10)));
+  await waitFor(() => sent.some((m) => m.type === "TRANSLATION_RESULT"));
+  assert.strictEqual(storage.data["translation:v1"].model, "gemini-2.5-flash");
+
+  storage.data.geminiModel = "gemini-3.8-flash";
+  const ack = await send(translate("v1", cues(10), { retranslate: true }));
+  assert.strictEqual(ack.status, "started");
+  await waitFor(() => sent.filter((m) => m.type === "TRANSLATION_RESULT").length === 2);
+  assert.strictEqual(gemini.calls.length, 2);
+  assert.ok(gemini.calls[1].url.endsWith("/gemini-3.8-flash:generateContent"), gemini.calls[1].url);
+  const entry = storage.data["translation:v1"];
+  assert.deepStrictEqual([entry.model, entry.complete], ["gemini-3.8-flash", true]);
+});
+
+test("retranslate: refused while the video is still being translated", async () => {
+  const gemini = makeGemini(undefined, { latencyMs: 100 });
+  const { sent, send } = makeContext({ gemini });
+  await send(translate("v1", cues(100)));
+  const ack = await send(translate("v1", cues(100), { retranslate: true }));
+  assert.strictEqual(ack.ok, false);
+  assert.ok(ack.error.includes("sürüyor")); // Turkish user-facing message
+  await waitFor(() => sent.some((m) => m.type === "TRANSLATION_RESULT"));
+  assert.strictEqual(gemini.calls.length, 4);
 });
 
 test("batching: long lines are split by the character limit", async () => {

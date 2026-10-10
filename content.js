@@ -42,7 +42,7 @@
   let lastVideoId = null;
   let runId = 0;
   let requestSeq = 0;
-  let tokenRetry = null; // { videoId, cacheOnly }
+  let tokenRetry = null; // { videoId, options } of the run that failed for lack of a token
   let checkTimer = null;
 
   const pendingRequests = new Map(); // id -> { resolve, timer }
@@ -117,9 +117,9 @@
 
     // If an earlier attempt failed for lack of a token (e.g. the user just turned on CC), retry.
     if (videoId === tokenRetry?.videoId && videoId === lastVideoId) {
-      const { cacheOnly } = tokenRetry;
+      const { options } = tokenRetry;
       tokenRetry = null;
-      processVideo(videoId, { cacheOnly });
+      processVideo(videoId, options);
     }
   }
 
@@ -400,8 +400,13 @@
 
   // cacheOnly: the user has not asked for this video, so only a complete cached translation
   // (or one already running) is shown and the API is never called.
-  async function requestTranslation(result, { cacheOnly = false } = {}) {
-    if (result.translated) {
+  // retranslate: the cached translation is ignored and the video is translated again with the
+  // model selected in the popup.
+  async function requestTranslation(result, { cacheOnly = false, retranslate = false } = {}) {
+    if (retranslate) {
+      // The old texts stay on screen until their new translation arrives.
+      result.translated = null;
+    } else if (result.translated) {
       reportTranslation(result);
       return;
     }
@@ -422,6 +427,7 @@
         // The chunk at the playback position is translated first (e.g. a video opened with &t=1219s).
         currentTime: overlay.currentTime(),
         cacheOnly,
+        retranslate,
       });
       applyTranslatedTexts(result, 0, response?.texts);
 
@@ -546,21 +552,39 @@
   }
 
   // TR button: translate the current video, or retry after an error.
-  overlay.onRequest = () => {
-    if (!lastVideoId) return;
+  // Popup: translate it again with the selected model (retranslate).
+  function translateCurrentVideo(options) {
+    if (!lastVideoId) return false;
     requestedVideos.add(lastVideoId);
     overlay.setEnabled(true);
-    processVideo(lastVideoId);
-  };
+    processVideo(lastVideoId, options);
+    return true;
+  }
 
-  async function processVideo(videoId, { cacheOnly = false } = {}) {
+  overlay.onRequest = () => translateCurrentVideo();
+
+  // Messages from the popup. The reply goes out right away; progress and errors show on the TR button.
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message?.type === "GET_VIDEO") {
+      const title = document.title.replace(/^\(\d+\) /, "").replace(/ - YouTube$/, "");
+      sendResponse({ videoId: lastVideoId, title: lastVideoId ? title : null });
+    } else if (message?.type === "RETRANSLATE") {
+      console.log(`${LOG_PREFIX} Re-translating with the selected model: ${lastVideoId}`);
+      const started = translateCurrentVideo({ retranslate: true });
+      // Shown in the popup, so it stays Turkish.
+      sendResponse(started ? { ok: true } : { ok: false, error: "Bu sekmede açık bir YouTube videosu yok." });
+    }
+  });
+
+  // options: { cacheOnly, retranslate }, see requestTranslation.
+  async function processVideo(videoId, options = {}) {
     const currentRun = ++runId;
     const isStale = () => currentRun !== runId;
 
     if (captionCache.has(videoId)) {
       const cached = captionCache.get(videoId);
       report(cached);
-      requestTranslation(cached, { cacheOnly });
+      requestTranslation(cached, options);
       return;
     }
 
@@ -589,11 +613,11 @@
       };
       cacheResult(result);
       report(result);
-      requestTranslation(result, { cacheOnly });
+      requestTranslation(result, options);
     } catch (error) {
       if (isStale()) return;
       if (error instanceof TokenError) {
-        tokenRetry = { videoId, cacheOnly };
+        tokenRetry = { videoId, options };
         console.warn(
           `${LOG_PREFIX} Captions could not be downloaded: ${error.message}. Will retry automatically when CC is turned on. (videoId=${videoId})`
         );
