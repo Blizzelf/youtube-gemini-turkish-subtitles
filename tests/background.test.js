@@ -367,12 +367,42 @@ test("priority: the chunk at the playback position goes first; seeking moves the
   const gemini = makeGemini(undefined, { latencyMs: 100 });
   const { sent, send } = makeContext({ gemini });
   // 320 lines, 2 s apart. Chunks start at 0, 80, 100 (10 lines, the playback position), 120,
-  // 200, 280, 360, 440, 520 and 600 s. Three are claimed at once.
+  // 200, ... s; the three from 100 s are claimed at once. The seek to 500 s splits the waiting
+  // chunks again: 500 s gets a 10-line chunk and goes next, the claimed ones stay as they are.
   await send(translate("v1", cues(320), { currentTime: 100 }));
   await waitFor(() => gemini.calls.length >= 1);
   await send({ type: "TRANSLATION_PRIORITY", videoId: "v1", time: 500 });
   await waitFor(() => sent.some((m) => m.type === "TRANSLATION_RESULT"));
-  assert.deepStrictEqual(gemini.calls.map((c) => c.chunk[0].start), [100, 120, 200, 440, 520, 600, 0, 80, 280, 360]);
+  assert.deepStrictEqual(
+    gemini.calls.map((c) => [c.chunk[0].start, c.chunk.length]),
+    [[100, 10], [120, 40], [200, 40], [500, 10], [520, 40], [600, 20], [0, 40], [80, 10], [280, 40], [360, 40], [440, 30]]
+  );
+  assert.strictEqual(sent.at(-1).texts.filter((t) => t === null).length, 0);
+});
+
+test("priority: seeking into a chunk being translated starts small right after it, no line twice", async () => {
+  const gemini = makeGemini(undefined, { latencyMs: 100 });
+  const { sent, send } = makeContext({ gemini });
+  // Claimed at once: lines 0-9, 10-49 and 50-89. 40 s is line 20, already being translated.
+  await send(translate("v1", cues(320)));
+  await waitFor(() => gemini.calls.length >= 1);
+  await send({ type: "TRANSLATION_PRIORITY", videoId: "v1", time: 40 });
+  await waitFor(() => sent.some((m) => m.type === "TRANSLATION_RESULT"));
+  assert.deepStrictEqual([gemini.calls[3].chunk[0].text, gemini.calls[3].chunk.length], ["line 90", 10]);
+  const sentLines = gemini.calls.flatMap((c) => c.chunk.map((cue) => cue.text));
+  assert.strictEqual(new Set(sentLines).size, sentLines.length, "a line was sent twice");
+  assert.strictEqual(sentLines.length, 320);
+});
+
+test("priority: a repeated request for a running job also moves its position up", async () => {
+  const gemini = makeGemini(undefined, { latencyMs: 100 });
+  const { sent, send } = makeContext({ gemini });
+  await send(translate("v1", cues(320)));
+  await waitFor(() => gemini.calls.length >= 1);
+  const ack = await send(translate("v1", cues(320), { currentTime: 500 }));
+  assert.strictEqual(ack.status, "pending");
+  await waitFor(() => sent.some((m) => m.type === "TRANSLATION_RESULT"));
+  assert.deepStrictEqual([gemini.calls[3].chunk[0].start, gemini.calls[3].chunk.length], [500, 10]);
 });
 
 test("the same video requested from two tabs runs one job and both tabs get the result", async () => {

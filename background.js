@@ -7,7 +7,7 @@
 //    translation was interrupted, the finished part is sent right away and work resumes.
 // 2. Batching: captions are split into chunks of at most 40 lines / 6000 characters. The
 //    first untranslated chunk at the playback position has only 10 lines, so the first
-//    subtitles appear quickly.
+//    subtitles appear quickly. On a seek the waiting chunks are split again the same way.
 // 3. Queue: all Gemini requests (for every tab) share one queue. Up to 3 run at once and
 //    starts are at least 0.5 s apart. After the first 429 (e.g. on the free tier) it drops to
 //    one request at a time, 2.5 s apart, until the browser closes. On 429 the queue pauses
@@ -358,25 +358,25 @@ async function translateChunk(apiKey, chunk, job) {
 
 // --- Batching ---
 
-// First untranslated line at or after the playback position (the line playing now included);
-// if everything after it is done, the first untranslated line. -1 when nothing is left.
-function firstPendingIndex(captions, texts, time) {
-  const index = captions.findIndex((cue, i) => texts[i] === null && cue.start + cue.duration >= time);
-  return index !== -1 ? index : texts.indexOf(null);
-}
+// Splits the job's captions into [start, end) ranges by line and character limits. Translated
+// lines, lines a worker is translating and waiting lines never share a chunk, so no line is
+// translated twice (an interrupted job resumes without redoing any). The first waiting line at
+// or after the playback position (the line playing now included; otherwise the first waiting
+// line) starts a chunk of only FIRST_CHUNK_ITEMS lines.
+// Called when a job starts and again on every seek.
+function createChunks(job) {
+  const { captions, texts, inFlight } = job;
+  const state = texts.map((text) => (text === null ? "waiting" : "done"));
+  for (const [start, end] of inFlight) state.fill("claimed", start, end);
+  let first = state.findIndex((s, i) => s === "waiting" && captions[i].start + captions[i].duration >= job.priorityTime);
+  if (first === -1) first = state.indexOf("waiting");
 
-// Splits the caption array into [start, end) ranges by line and character limits. A chunk never
-// mixes translated and untranslated lines, so an interrupted job resumes without redoing any.
-// The chunk at firstIndex is cut to FIRST_CHUNK_ITEMS lines.
-function createChunks(captions, texts, firstIndex) {
   const chunks = [];
   let start = 0;
   let chars = 0;
   captions.forEach((cue, i) => {
     const size = cue.text.length + CHUNK_FIELD_CHARS;
-    const boundary =
-      (texts[i] === null) !== (texts[i - 1] === null) ||
-      (firstIndex >= 0 && (i === firstIndex || i === firstIndex + FIRST_CHUNK_ITEMS));
+    const boundary = state[i] !== state[i - 1] || (first !== -1 && (i === first || i === first + FIRST_CHUNK_ITEMS));
     if (i > start && (boundary || i - start >= CHUNK_MAX_ITEMS || chars + size > CHUNK_MAX_CHARS)) {
       chunks.push({ start, end: i });
       start = i;
@@ -609,10 +609,12 @@ function progressOf(job) {
   return { done: job.chunks.filter((chunk) => isChunkDone(job, chunk)).length, total: job.chunks.length };
 }
 
+const isClaimed = (job, chunk) => [...job.inFlight].some(([start, end]) => chunk.start < end && start < chunk.end);
+
 // The chunk containing (or following) the playback position goes first, then the earlier ones.
 // Chunks another worker is translating are skipped.
 function pickNextChunk(job) {
-  const pending = job.chunks.filter((chunk) => !isChunkDone(job, chunk) && !job.inFlight.has(chunk));
+  const pending = job.chunks.filter((chunk) => !isChunkDone(job, chunk) && !isClaimed(job, chunk));
   if (!pending.length) return null;
   return (
     pending.find((chunk) => {
@@ -627,7 +629,7 @@ function pickNextChunk(job) {
 async function runWorker(job, apiKey, index) {
   let chunk;
   while (!job.error && index < requestSlots && (chunk = pickNextChunk(job))) {
-    job.inFlight.add(chunk);
+    job.inFlight.set(chunk.start, chunk.end);
     try {
       const texts = await translateChunk(apiKey, job.captions.slice(chunk.start, chunk.end), job);
       texts.forEach((text, i) => {
@@ -639,7 +641,7 @@ async function runWorker(job, apiKey, index) {
     } catch (error) {
       job.error ??= error; // The first error stops the job; queued requests are dropped.
     } finally {
-      job.inFlight.delete(chunk);
+      job.inFlight.delete(chunk.start);
     }
   }
 }
@@ -650,6 +652,12 @@ async function runJob(job, apiKey) {
   if (job.error) throw job.error;
 }
 
+// Seeking: the chunks are split again so the new position is translated next, in a small chunk.
+function setPriority(job, time) {
+  job.priorityTime = time;
+  job.chunks = createChunks(job);
+}
+
 function startJob({ apiKey, key, videoId, title, captions, hash, texts, priorityTime, target }) {
   const job = {
     videoId,
@@ -658,11 +666,12 @@ function startJob({ apiKey, key, videoId, title, captions, hash, texts, priority
     hash,
     texts,
     priorityTime,
-    chunks: createChunks(captions, texts, firstPendingIndex(captions, texts, priorityTime)),
-    inFlight: new Set(), // Chunks a worker is translating
+    chunks: [],
+    inFlight: new Map(), // start -> end of the chunks workers are translating
     error: null, // First error; stops the job
     targets: new Set([target]),
   };
+  job.chunks = createChunks(job);
   job.notify = (message) => notifyTargets(job.targets, { videoId, ...message });
   jobs.set(key, job);
   updateKeepAlive();
@@ -745,7 +754,7 @@ async function handleTranslate(message, sender) {
   const running = jobs.get(key);
   if (running) {
     running.targets.add(target);
-    running.priorityTime = priorityTime;
+    setPriority(running, priorityTime);
     return { ok: true, status: "pending", texts: running.texts, ...progressOf(running) };
   }
 
@@ -833,7 +842,7 @@ async function handleMessage(message, sender) {
     case "TRANSLATION_PRIORITY": {
       if (Number.isFinite(message.time)) {
         for (const job of jobs.values()) {
-          if (job.videoId === message.videoId) job.priorityTime = message.time;
+          if (job.videoId === message.videoId) setPriority(job, message.time);
         }
       }
       return { ok: true };
