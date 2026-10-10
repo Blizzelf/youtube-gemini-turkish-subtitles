@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="icons/icon-128.png" width="128" height="128" alt="YouTube Çeviri logo">
+</p>
+
 # YouTube Çeviri
 
 A Chrome / Edge extension (Manifest V3) that translates YouTube captions into Turkish with Google Gemini and shows them as subtitles on the video.
