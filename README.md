@@ -13,7 +13,8 @@ A Chrome / Edge extension (Manifest V3) that translates YouTube captions into Tu
 - **Progressive display:** Each chunk appears on screen as soon as it is translated, starting at the current playback position. Seeking moves the new position to the front of the queue.
 - **Cache:** Translations are stored in `chrome.storage.local` by video ID. Reopening a video loads instantly without calling the API. Interrupted translations resume where they stopped. The cache is limited to 8 MB and removes the least recently used entries first.
 - **Export / import:** Move your translations between browsers (for example Chrome to Edge) as a JSON file.
-- **On-player controls:** A **TR** button next to the CC button turns the Turkish subtitles on and off and shows progress and errors.
+- **On demand:** Nothing is translated until you click the **TR** button next to the CC button, so the API quota goes only to the videos you choose. Videos translated before load on their own. An option in the popup translates every video automatically instead.
+- **On-player controls:** After the translation starts, the **TR** button turns the Turkish subtitles on and off and shows progress and errors.
 
 ## Installation
 
@@ -28,9 +29,11 @@ Requires Chrome / Edge 111 or newer.
 
 ## Usage
 
-Open any YouTube video that has captions. The **TR** button pulses while the translation is prepared, and Turkish subtitles appear as chunks finish. Click **TR** to hide or show them; while they are on, YouTube's own captions are hidden.
+Open a YouTube video that has captions and click the **TR** button next to the CC button. The button pulses while the translation is prepared, and Turkish subtitles appear as chunks finish. After that, click **TR** to hide or show them; while they are on, YouTube's own captions are hidden. If something fails before any subtitle appears (for example a missing API key), click **TR** again to retry.
 
-The popup shows how many videos are cached. You can clear the cache or export and import it there.
+Videos you translated before show their subtitles without a click. To translate every video as soon as it opens, turn on **Videoları otomatik çevir** in the popup.
+
+The popup also shows how many videos are cached. You can clear the cache or export and import it there.
 
 ## How it works
 
@@ -41,7 +44,7 @@ The popup shows how many videos are cached. You can clear the cache or export an
 | `segmenter.js` | Regroups auto-generated captions into sentences and splits long ones at natural points. |
 | `background.js` | Service worker. Owns the API key, the request queue, retries, and the cache. |
 | `overlay.js`, `overlay.css` | Draws the subtitles over the player and the **TR** button. |
-| `popup.html`, `popup.js` | API key, cache stats, clear, export and import. |
+| `popup.html`, `popup.js` | API key, auto-translate option, cache stats, clear, export and import. |
 
 ## Privacy
 
@@ -79,6 +82,7 @@ This project is not affiliated with, endorsed by or sponsored by YouTube or Goog
 YouTube altyazılarını Google Gemini ile Türkçeye çevirip videonun üstünde altyazı olarak gösteren bir Chrome / Edge eklentisi (Manifest V3).
 
 **Öne çıkanlar:**
+- Oynatıcıdaki **TR** butonuna tıkladığınız videoyu çevirir; daha önce çevrilen videolar kendiliğinden yüklenir. İsterseniz popup'tan her videoyu otomatik çevirmeyi açabilirsiniz.
 - Videonun orijinal dildeki altyazısını alır. Otomatik altyazıyı, çeviride anlam kaymasın diye cümlelere göre yeniden böler.
 - `gemini-3.8-flash` ile parça parça çevirir. Zaman damgaları her zaman orijinalden alınır.
 - Hız sınırına (429) takılınca bekleyip tekrar dener. Çevrilen parçalar hemen ekranda görünür.

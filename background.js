@@ -485,6 +485,18 @@ function importTranslationCache(data) {
   });
 }
 
+// Checked by videoId alone before the captions are downloaded: a video with a complete
+// translation or a running job is shown without the user asking for it again.
+async function hasTranslation(videoId) {
+  if (typeof videoId !== "string" || !videoId) return false;
+  for (const job of jobs.values()) {
+    if (job.videoId === videoId) return true;
+  }
+  const key = CACHE_PREFIX + videoId;
+  const entry = (await chrome.storage.local.get(key))[key];
+  return entry?.version === CACHE_VERSION && entry.model === GEMINI_MODEL && entry.complete === true;
+}
+
 // Marks an entry read from the cache as most recently used.
 function touchTranslation(videoId) {
   return withCacheLock(async () => {
@@ -666,6 +678,9 @@ async function startOrLoadTranslation({ message, videoId, captions, hash, key, t
     return { ok: true, status: "cached", texts: cached.texts };
   }
 
+  // A video the user has not asked to translate only shows a complete cached translation.
+  if (message.cacheOnly) return { ok: true, status: "not-cached", texts: null };
+
   const apiKey = await getApiKey();
   if (!apiKey) {
     return {
@@ -702,6 +717,9 @@ async function handleMessage(message, sender) {
       console.log(`${LOG_PREFIX} Watch page ready: videoId=${message.videoId}, tabId=${tabId}`);
       return { ok: true };
     }
+
+    case "HAS_TRANSLATION":
+      return { ok: true, available: await hasTranslation(message.videoId) };
 
     case "TRANSLATE":
       return handleTranslate(message, sender);

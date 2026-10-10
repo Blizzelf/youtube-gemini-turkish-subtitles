@@ -1,5 +1,6 @@
-// Shows the translated subtitles over the YouTube player and adds an on/off button to the
-// control bar. Loaded before content.js (same isolated world).
+// Shows the translated subtitles over the YouTube player and adds a button to the control bar
+// that starts the translation and then turns the subtitles on and off. Loaded before
+// content.js (same isolated world).
 // Video time is read from the <video> element; the DOM is written only via textContent.
 // The button's labels are shown to the user, so they stay Turkish.
 
@@ -13,13 +14,14 @@ class SubtitleOverlay {
   constructor() {
     this.cues = [];
     this.enabled = true;
-    this.status = "idle"; // idle | loading | ready | error
+    this.status = "idle"; // idle | available | loading | ready | error
     this.statusText = "";
     this.player = null;
     this.video = null;
     this.frame = null;
     this.lastText = null;
     this.onSeek = null; // content.js: moves the seeked position to the front while translating
+    this.onRequest = null; // content.js: starts (or retries) translating the current video
 
     this.container = document.createElement("div");
     this.container.className = "yt-ceviri-overlay";
@@ -34,7 +36,8 @@ class SubtitleOverlay {
     this.button.textContent = "TR";
     this.button.addEventListener("click", (event) => {
       event.stopPropagation();
-      this.setEnabled(!this.enabled);
+      if (this.canRequest()) this.onRequest?.();
+      else if (this.status !== "idle") this.setEnabled(!this.enabled);
     });
 
     this.resizeObserver = new ResizeObserver(() => this.updateLayout());
@@ -105,6 +108,7 @@ class SubtitleOverlay {
     this.cues = Array.isArray(cues) ? cues : [];
     this.lastText = null;
     this.updatePlayerClass();
+    this.updateButton();
     if (this.attach() && !this.video.paused) this.startLoop();
     this.render();
   }
@@ -121,11 +125,19 @@ class SubtitleOverlay {
     this.render();
   }
 
+  // The button is the way to start a translation, so it is (re)inserted on every status change.
   setStatus(status, text) {
     this.status = status;
     this.statusText = text || "";
+    if (status !== "idle") this.attach();
     this.updatePlayerClass();
     this.updateButton();
+  }
+
+  // Clicking starts the translation when none has been requested yet, or retries a failed
+  // attempt that left nothing on screen. Otherwise it turns the subtitles on and off.
+  canRequest() {
+    return this.status === "available" || (this.status === "error" && this.cues.length === 0);
   }
 
   setEnabled(enabled, { save = true } = {}) {
@@ -143,15 +155,23 @@ class SubtitleOverlay {
     button.classList.toggle("is-loading", this.status === "loading");
     button.classList.toggle("is-error", this.status === "error");
     button.classList.toggle("is-idle", this.status === "idle");
+    button.classList.toggle("is-available", this.status === "available");
     // The preference is shown while translating too; otherwise the button looks off and a
     // user pressing it to "turn it on" would actually turn the subtitles off.
-    button.setAttribute("aria-pressed", String(this.enabled && this.status !== "idle"));
+    const showing = this.status === "loading" || this.status === "ready" || this.cues.length > 0;
+    button.setAttribute("aria-pressed", String(this.enabled && showing));
 
     const state = this.enabled ? "açık" : "kapalı";
-    const title =
-      this.status === "ready"
-        ? `${this.statusText}: ${state} (tıklayarak değiştirin)`
-        : `${this.statusText || "Türkçe altyazı"} · Türkçe altyazı ${state}`;
+    let title;
+    if (this.canRequest()) {
+      title = this.status === "available" ? this.statusText : `${this.statusText} · Tekrar denemek için tıklayın`;
+    } else if (this.status === "ready") {
+      title = `${this.statusText}: ${state} (tıklayarak değiştirin)`;
+    } else if (this.status === "idle") {
+      title = this.statusText;
+    } else {
+      title = `${this.statusText || "Türkçe altyazı"} · Türkçe altyazı ${state}`;
+    }
     button.title = title;
     button.setAttribute("aria-label", title);
   }

@@ -1,9 +1,11 @@
-// Popup: saves the user's Gemini API key to chrome.storage.local and shows, clears, exports
-// and imports the translation cache (the cache belongs to background.js; requested by message).
+// Popup: saves the user's Gemini API key and the auto-translate option to chrome.storage.local,
+// and shows, clears, exports and imports the translation cache (the cache belongs to
+// background.js; requested by message).
 // The saved key is never written back into the input; only a masked form is shown.
 // All strings in this file are shown to the user, so they are Turkish.
 
 const STORAGE_KEY = "geminiApiKey";
+const AUTO_TRANSLATE_KEY = "autoTranslate"; // Read by content.js; off by default
 const CLEAR_CONFIRM_MS = 4000; // How long the "Emin misiniz?" (are you sure?) state lasts
 const IMPORT_MAX_BYTES = 20 * 1024 * 1024;
 
@@ -18,6 +20,7 @@ const els = {
   saveBtn: document.getElementById("saveBtn"),
   deleteBtn: document.getElementById("deleteBtn"),
   message: document.getElementById("message"),
+  autoTranslate: document.getElementById("autoTranslate"),
   cacheStats: document.getElementById("cacheStats"),
   clearCacheBtn: document.getElementById("clearCacheBtn"),
   exportBtn: document.getElementById("exportBtn"),
@@ -106,6 +109,26 @@ function toggleVisibility() {
   els.input.type = hidden ? "text" : "password";
   els.toggleBtn.textContent = hidden ? "Gizle" : "Göster";
   els.toggleBtn.setAttribute("aria-label", hidden ? "Anahtarı gizle" : "Anahtarı göster");
+}
+
+// --- Auto-translate option (applies to videos opened after the change) ---
+
+async function loadAutoTranslate() {
+  try {
+    const result = await chrome.storage.local.get(AUTO_TRANSLATE_KEY);
+    els.autoTranslate.checked = result[AUTO_TRANSLATE_KEY] === true;
+  } catch (error) {
+    showMessage(`Ayar okunamadı: ${error?.message || error}`, "error");
+  }
+}
+
+async function saveAutoTranslate() {
+  try {
+    await chrome.storage.local.set({ [AUTO_TRANSLATE_KEY]: els.autoTranslate.checked });
+  } catch (error) {
+    els.autoTranslate.checked = !els.autoTranslate.checked;
+    showMessage(`Ayar kaydedilemedi: ${error?.message || error}`, "error");
+  }
 }
 
 // --- Translation cache ---
@@ -253,6 +276,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (event.key === "Enter") saveKey();
   });
   els.input.addEventListener("input", () => showMessage(""));
+  els.autoTranslate.addEventListener("change", saveAutoTranslate);
   els.clearCacheBtn.addEventListener("click", clearCache);
   els.exportBtn.addEventListener("click", exportCache);
   els.importBtn.addEventListener("click", startImport);
@@ -267,5 +291,6 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   loadStatus();
+  loadAutoTranslate();
   loadCacheStats();
 });

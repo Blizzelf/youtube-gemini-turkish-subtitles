@@ -83,6 +83,11 @@
   opacity: 0.5;
 }
 
+/* Not translated yet: the click starts the translation. */
+#movie_player .yt-ceviri-button.is-available:hover {
+  opacity: 1;
+}
+
 #movie_player .yt-ceviri-button.is-error {
   color: #ff8a80;
 }

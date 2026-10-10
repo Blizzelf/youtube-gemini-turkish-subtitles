@@ -186,6 +186,26 @@
 
     #clearCacheBtn { flex-shrink: 0; }
 
+    .option {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      margin: 0;
+      font-weight: 400;
+      cursor: pointer;
+    }
+
+    .option input {
+      margin: 2px 0 0;
+      accent-color: var(--accent);
+    }
+
+    .option strong {
+      display: block;
+      font-size: 13px;
+      font-weight: 600;
+    }
+
     /* For import, the popup opens in a tab (?view=tab). */
     body.tab-view {
       width: auto;
@@ -230,6 +250,16 @@
       Anahtarınız yok mu?
       <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer">Google AI Studio'dan alın</a>
     </p>
+
+    <section class="cache">
+      <label class="option">
+        <input id="autoTranslate" type="checkbox">
+        <span>
+          <strong>Videoları otomatik çevir</strong>
+          <span class="cache-stats">Kapalıyken çeviri, oynatıcıdaki TR butonuna tıklayınca başlar. Daha önce çevrilen videolar her zaman yüklenir.</span>
+        </span>
+      </label>
+    </section>
 
     <section class="cache" aria-labelledby="cacheTitle">
       <div class="cache-row">

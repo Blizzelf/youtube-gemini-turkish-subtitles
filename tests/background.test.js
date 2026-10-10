@@ -185,6 +185,55 @@ test("cache: changed captions do not reuse the old translation", async () => {
   assert.strictEqual(ack.status, "started");
 });
 
+test("cacheOnly: a cached translation loads, an uncached video does not call the API", async () => {
+  const gemini = makeGemini();
+  const { sent, send } = makeContext({ gemini });
+  const missing = await send(translate("v1", cues(10), { cacheOnly: true }));
+  assert.deepStrictEqual([missing.ok, missing.status], [true, "not-cached"]);
+  assert.strictEqual(gemini.calls.length, 0);
+
+  await send(translate("v1", cues(10)));
+  await waitFor(() => sent.some((m) => m.type === "TRANSLATION_RESULT"));
+  const calls = gemini.calls.length;
+  const cached = await send(translate("v1", cues(10), { cacheOnly: true }));
+  assert.strictEqual(cached.status, "cached");
+  const changed = await send(translate("v1", cues(10, { text: (i) => `changed ${i}` }), { cacheOnly: true }));
+  assert.strictEqual(changed.status, "not-cached");
+  assert.strictEqual(gemini.calls.length, calls);
+});
+
+test("cacheOnly: joins a translation that is already running", async () => {
+  const gemini = makeGemini();
+  const { sent, send } = makeContext({ gemini });
+  await send(translate("v1", cues(100)));
+  const ack = await send(translate("v1", cues(100), { cacheOnly: true }));
+  assert.strictEqual(ack.status, "pending");
+  await waitFor(() => sent.some((m) => m.type === "TRANSLATION_RESULT"));
+});
+
+test("HAS_TRANSLATION: true for complete or running translations only", async () => {
+  let failSecond = true;
+  const gemini = makeGemini((call) =>
+    failSecond && call === 2 ? { ok: false, status: 400, json: async () => ({ error: { message: "Bad request" } }) } : null
+  );
+  const { sent, send, storage } = makeContext({ gemini });
+  const has = async (videoId) => (await send({ type: "HAS_TRANSLATION", videoId })).available;
+  assert.strictEqual(await has("v1"), false);
+
+  await send(translate("v1", cues(100)));
+  assert.strictEqual(await has("v1"), true, "running job");
+  await waitFor(() => sent.some((m) => m.type === "TRANSLATION_ERROR"));
+  assert.strictEqual(await has("v1"), false, "partial translation");
+
+  failSecond = false;
+  await send(translate("v1", cues(100)));
+  await waitFor(() => sent.some((m) => m.type === "TRANSLATION_RESULT"));
+  assert.strictEqual(await has("v1"), true, "complete translation");
+  storage.data["translation:v1"].version = 0;
+  assert.strictEqual(await has("v1"), false, "old cache version");
+  assert.strictEqual(await has(""), false);
+});
+
 test("429: waits for RetryInfo, sends STATUS, retries the chunk", async () => {
   const gemini = makeGemini((call) =>
     call === 1
