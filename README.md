@@ -4,6 +4,7 @@
 
 <p align="center">
   <a href="https://github.com/Blizzelf/youtube-gemini-turkish-subtitles/releases/latest"><img src="https://img.shields.io/github/v/release/Blizzelf/youtube-gemini-turkish-subtitles" alt="Latest release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/Blizzelf/youtube-gemini-turkish-subtitles" alt="License: MIT"></a>
 </p>
 
 # YouTube Çeviri
