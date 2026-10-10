@@ -12,6 +12,8 @@ const OVERLAY_FONT_RATIO = 0.042; // Font size / player height
 const OVERLAY_MIN_FONT_PX = 14;
 const OVERLAY_MAX_LINES = 2; // Maximum lines shown at once (for overlapping captions)
 const OVERLAY_LOOKBACK = 5; // Lines to look back for overlaps
+const BUTTON_MAX_MOVES = 10; // Moves back to the end of the control bar allowed per window
+const BUTTON_MOVE_WINDOW_MS = 10000;
 const SUBTITLE_SIZE_LIMITS = { min: 50, max: 200, step: 10 }; // Percent of the base size
 const SUBTITLE_BACKGROUND_LIMITS = { min: 0, max: 100, step: 10 }; // Percent opacity
 
@@ -107,6 +109,9 @@ class SubtitleOverlay {
     this.frame = null;
     this.lastKey = null;
     this.timedWords = new WeakMap(); // cue -> splitTimedWords(cue)
+    this.controlsParent = null; // .ytp-right-controls being watched (watchControls)
+    this.controlsObserver = null;
+    this.buttonMoves = []; // Times the button was moved back to the end
     this.onSeek = null; // content.js: moves the seeked position to the front while translating
     this.onRequest = null; // content.js: starts (or retries) translating the current video
     this.onRetranslate = null; // content.js: translates the video again with the selected model
@@ -121,7 +126,7 @@ class SubtitleOverlay {
     this.button = document.createElement("button");
     this.button.type = "button";
     this.button.className = "ytp-button yt-ceviri-button";
-    this.button.textContent = "TR";
+    // The logo comes from overlay.css; the label is set in updateButton().
     this.button.setAttribute("aria-haspopup", "menu");
     this.button.setAttribute("aria-expanded", "false");
     this.button.addEventListener("click", (event) => {
@@ -200,15 +205,33 @@ class SubtitleOverlay {
     return true;
   }
 
-  // The button goes to the left of the CC button. Re-added if YouTube redraws its controls.
+  // The button sits at the right end of the control bar, after the buttons other extensions
+  // add too. Re-added if YouTube redraws its controls.
   ensureButton() {
-    const ccButton = this.player.querySelector(".ytp-subtitles-button");
-    const parent = ccButton?.parentElement || this.player.querySelector(".ytp-right-controls");
+    const parent = this.player.querySelector(".ytp-right-controls");
     if (!parent) return;
-    if (this.button.parentElement !== parent) {
-      parent.insertBefore(this.button, ccButton || parent.firstChild);
-    }
+    if (parent.lastElementChild !== this.button) parent.append(this.button);
+    this.watchControls(parent);
     this.updateButton();
+  }
+
+  // Other extensions often add their buttons after ours; the button moves back to the end.
+  // Moves are limited per time window, so two extensions that both want the last place do
+  // not push each other forever.
+  watchControls(parent) {
+    if (this.controlsParent === parent) return;
+    this.controlsObserver?.disconnect();
+    this.controlsParent = parent;
+    this.buttonMoves = [];
+    this.controlsObserver = new MutationObserver(() => {
+      if (this.button.parentElement !== parent || parent.lastElementChild === this.button) return;
+      const now = Date.now();
+      this.buttonMoves = this.buttonMoves.filter((time) => now - time < BUTTON_MOVE_WINDOW_MS);
+      if (this.buttonMoves.length >= BUTTON_MAX_MOVES) return;
+      this.buttonMoves.push(now);
+      parent.append(this.button);
+    });
+    this.controlsObserver.observe(parent, { childList: true });
   }
 
   // Does not change the status: while translating, finished chunks are shown and the status

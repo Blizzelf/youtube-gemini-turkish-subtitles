@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>YouTube Çeviri</title>
+  <link rel="icon" href="icons/icon-32.png">
   <style>
     :root {
       --bg: #f6f7f9;
@@ -54,9 +55,17 @@
     }
 
     h1 {
+      display: flex;
+      align-items: center;
+      gap: 8px;
       margin: 0 0 4px;
       font-size: 16px;
       font-weight: 600;
+    }
+
+    h1 img {
+      width: 28px;
+      height: 28px;
     }
 
     .subtitle {
@@ -267,7 +276,7 @@
 </head>
 <body>
   <main class="card">
-    <h1>YouTube Çeviri</h1>
+    <h1><img src="icons/icon-48.png" alt="">YouTube Çeviri</h1>
     <p class="subtitle">Çeviri için kendi Gemini API anahtarınızı girin. Anahtar yalnızca bu tarayıcıda saklanır.</p>
 
     <span id="status" class="badge">Kontrol ediliyor…</span>
