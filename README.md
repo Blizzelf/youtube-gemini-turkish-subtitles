@@ -15,7 +15,7 @@ A Chrome / Edge extension (Manifest V3) that translates YouTube captions into Tu
 - **Export / import:** Move your translations between browsers (for example Chrome to Edge) as a JSON file.
 - **On demand:** Nothing is translated until you turn on **Türkçe altyazı** in the **TR** button's menu, so the API quota goes only to the videos you choose. Videos translated before load on their own. An option translates every video automatically instead.
 - **Player menu:** The **TR** button next to the CC button opens a menu like YouTube's settings menu: subtitles on/off with progress and errors, subtitle mode (Turkish only, or dual with the original line), model, re-translating the video, auto-translate, and the settings page.
-- **Subtitle style:** Font size, color, font and bold for the translation and the original line separately, plus background opacity and blur, outline style, and which line is on top. Only system fonts are used, so nothing is downloaded.
+- **Subtitle style:** Font size, color, font and bold for the translation and the original line separately, plus background opacity and blur, outline style, and which line is on top. In dual mode the word being spoken in the original line can be highlighted: exactly with auto-generated captions (word timings), estimated from word lengths with manual ones. Only system fonts are used, so nothing is downloaded.
 
 ## Installation
 
@@ -85,7 +85,7 @@ YouTube altyazılarını Google Gemini ile Türkçeye çevirip videonun üstünd
 
 **Öne çıkanlar:**
 - Yalnızca istediğiniz videoyu çevirir: oynatıcıdaki **TR** butonu YouTube'un ayar menüsüne benzeyen bir menü açar, **Türkçe altyazı**'yı açınca çeviri başlar. Daha önce çevrilen videolar kendiliğinden yüklenir. İsterseniz her videoyu otomatik çevirmeyi açabilirsiniz.
-- Menüden altyazı modu (yalnız Türkçe ya da orijinalle birlikte çift dil) ve altyazı stili (yazı boyutu, renk, yazı tipi, kalınlık, arka plan, kontur) ayarlanır.
+- Menüden altyazı modu (yalnız Türkçe ya da orijinalle birlikte çift dil) ve altyazı stili (yazı boyutu, renk, yazı tipi, kalınlık, arka plan, kontur) ayarlanır. Çift dil modunda orijinal satırda o an söylenen kelime vurgulanabilir.
 - Videonun orijinal dildeki altyazısını alır. Otomatik altyazıyı, çeviride anlam kaymasın diye cümlelere göre yeniden böler.
 - Varsayılan olarak `gemini-2.5-flash` ile parça parça çevirir; daha iyi çeviri için popup'tan `gemini-3.8-flash` seçilebilir. Önceden çevrilmiş bir video popup'taki **Bu videoyu yeniden çevir** butonuyla seçili modelle baştan çevrilebilir. Zaman damgaları her zaman orijinalden alınır.
 - Hız sınırına (429) takılınca bekleyip tekrar dener. Çevrilen parçalar hemen ekranda görünür.

@@ -390,6 +390,7 @@
       start: cue.start,
       duration: cue.duration,
       original: cue.text,
+      wordStarts: cue.wordStarts,
       text: typeof texts[i] === "string" ? texts[i] : null,
     }));
   }
@@ -437,7 +438,8 @@
         videoId: result.videoId,
         title: result.title,
         language: result.language,
-        captions: result.captions,
+        // Word timings (highlighting) stay here; only what is translated is sent.
+        captions: result.captions.map(({ start, duration, text }) => ({ start, duration, text })),
         // The chunk at the playback position is translated first (e.g. a video opened with &t=1219s).
         currentTime: overlay.currentTime(),
         cacheOnly,

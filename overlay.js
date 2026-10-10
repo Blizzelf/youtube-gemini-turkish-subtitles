@@ -1,7 +1,8 @@
 // Shows the translated subtitles over the YouTube player and adds a button to the control bar
 // that opens the subtitle menu (menu.js). Loaded before menu.js and content.js (same isolated
-// world). In dual mode the original line is shown together with the translation; how both
-// look is set in the menu and stored under SETTINGS_STORAGE_KEY.
+// world). In dual mode the original line is shown together with the translation, and the word
+// being spoken can be highlighted; how both lines look is set in the menu and stored under
+// SETTINGS_STORAGE_KEY.
 // Video time is read from the <video> element; the DOM is written only via textContent.
 // Labels shown to the user stay Turkish.
 
@@ -32,6 +33,8 @@ const SUBTITLE_MODES = { translation: "Yalnız çeviri", dual: "Çift dil" };
 const DEFAULT_SUBTITLE_SETTINGS = {
   mode: "translation",
   translationFirst: false, // Dual mode: the original above, the translation below
+  wordHighlight: true, // Dual mode: the word being spoken in the original line is colored
+  highlightColor: "#ffd54f",
   translation: { size: 100, color: "#ffffff", font: "youtube", bold: false },
   original: { size: 85, color: "#ffffff", font: "youtube", bold: false },
   background: 75,
@@ -47,11 +50,12 @@ function normalizeSubtitleSettings(stored) {
   const isBoolean = (field) => typeof field === "boolean";
   const inRange = ({ min, max }) => (field) => Number.isFinite(field) && field >= min && field <= max;
   const pick = (field, valid, fallback) => (valid(field) ? field : fallback);
+  const isColor = (color) => typeof color === "string" && /^#[0-9a-f]{6}$/i.test(color);
   const line = (stored, fallback) => {
     const lineValue = stored && typeof stored === "object" ? stored : {};
     return {
       size: pick(lineValue.size, inRange(SUBTITLE_SIZE_LIMITS), fallback.size),
-      color: pick(lineValue.color, (color) => typeof color === "string" && /^#[0-9a-f]{6}$/i.test(color), fallback.color),
+      color: pick(lineValue.color, isColor, fallback.color),
       font: pick(lineValue.font, (font) => Object.hasOwn(SUBTITLE_FONTS, font), fallback.font),
       bold: pick(lineValue.bold, isBoolean, fallback.bold),
     };
@@ -59,6 +63,8 @@ function normalizeSubtitleSettings(stored) {
   return {
     mode: pick(value.mode, (mode) => Object.hasOwn(SUBTITLE_MODES, mode), defaults.mode),
     translationFirst: pick(value.translationFirst, isBoolean, defaults.translationFirst),
+    wordHighlight: pick(value.wordHighlight, isBoolean, defaults.wordHighlight),
+    highlightColor: pick(value.highlightColor, isColor, defaults.highlightColor),
     translation: line(value.translation, defaults.translation),
     original: line(value.original, defaults.original),
     background: pick(value.background, inRange(SUBTITLE_BACKGROUND_LIMITS), defaults.background),
@@ -67,10 +73,29 @@ function normalizeSubtitleSettings(stored) {
   };
 }
 
+// The words of an original line with their start times: from the auto-generated captions'
+// word timings when they match the words (segmenter.js), otherwise estimated from the word
+// lengths over the line's duration. tokens alternates words and the spaces between them.
+function splitTimedWords(cue) {
+  const tokens = cue.original.split(/(\s+)/).filter(Boolean);
+  const words = tokens.filter((token) => !/^\s/.test(token));
+  if (cue.wordStarts?.length === words.length) return { tokens, starts: cue.wordStarts };
+
+  const total = words.reduce((sum, word) => sum + word.length, 0) || 1;
+  let chars = 0;
+  const starts = words.map((word) => {
+    const start = cue.start + (chars / total) * cue.duration;
+    chars += word.length;
+    return start;
+  });
+  return { tokens, starts };
+}
+
 class SubtitleOverlay {
   constructor() {
-    // Every caption line: { start, duration, original, text }. text is the translation (null
-    // until translated); original is null when the captions are already Turkish.
+    // Every caption line: { start, duration, original, text, wordStarts? }. text is the
+    // translation (null until translated); original is null when the captions are already
+    // Turkish; wordStarts comes with auto-generated captions.
     this.cues = [];
     this.hasText = false; // At least one line is translated
     this.enabled = true;
@@ -81,6 +106,7 @@ class SubtitleOverlay {
     this.video = null;
     this.frame = null;
     this.lastKey = null;
+    this.timedWords = new WeakMap(); // cue -> splitTimedWords(cue)
     this.onSeek = null; // content.js: moves the seeked position to the front while translating
     this.onRequest = null; // content.js: starts (or retries) translating the current video
     this.onRetranslate = null; // content.js: translates the video again with the selected model
@@ -268,6 +294,7 @@ class SubtitleOverlay {
       this.container.classList.toggle(`edge-${edge}`, settings.edge === edge);
     }
     this.container.style.setProperty("--yt-ceviri-background", `rgba(8, 8, 8, ${settings.background / 100})`);
+    this.container.style.setProperty("--yt-ceviri-highlight", settings.highlightColor);
     this.styleLine(this.translationEl, settings.translation);
     this.styleLine(this.originalEl, settings.original);
     this.lastKey = null;
@@ -322,7 +349,7 @@ class SubtitleOverlay {
   }
 
   // Finds the last line with start <= time by binary search; also collects overlapping lines.
-  findActiveLines(time) {
+  findActiveCues(time) {
     const cues = this.cues;
     let low = 0;
     let high = cues.length - 1;
@@ -341,27 +368,61 @@ class SubtitleOverlay {
     for (let i = index; i >= 0 && i > index - OVERLAY_LOOKBACK && active.length < OVERLAY_MAX_LINES; i--) {
       if (time < cues[i].start + cues[i].duration) active.unshift(cues[i]);
     }
-    return {
-      translation: active.map((cue) => cue.text).filter(Boolean).join("\n"),
-      original: active.map((cue) => cue.original).filter(Boolean).join("\n"),
-    };
+    return active;
   }
 
-  render() {
-    let translation = "";
-    let original = "";
-    if (this.enabled && this.cues.length > 0 && this.video) {
-      ({ translation, original } = this.findActiveLines(this.video.currentTime));
-      if (this.settings.mode !== "dual") original = "";
+  // Index of the word being spoken in an original line (-1 before its first word).
+  activeWord(cue, time) {
+    let timed = this.timedWords.get(cue);
+    if (!timed) {
+      timed = splitTimedWords(cue);
+      this.timedWords.set(cue, timed);
     }
-    const key = `${original}\u0000${translation}`;
+    let index = -1;
+    while (index + 1 < timed.starts.length && timed.starts[index + 1] <= time) index++;
+    return index;
+  }
+
+  // Runs on every frame; the DOM is touched only when the text or the highlighted word changes.
+  render() {
+    let active = [];
+    const time = this.video?.currentTime ?? 0;
+    if (this.enabled && this.cues.length > 0 && this.video) active = this.findActiveCues(time);
+    const translation = active.map((cue) => cue.text).filter(Boolean).join("\n");
+    const originals = this.settings.mode === "dual" ? active.filter((cue) => cue.original) : [];
+    const highlighted = this.settings.wordHighlight ? originals.map((cue) => this.activeWord(cue, time)) : [];
+    const original = originals.map((cue) => cue.original).join("\n");
+
+    const key = `${original}\u0000${translation}\u0000${highlighted.join(",")}`;
     if (key === this.lastKey) return;
     this.lastKey = key;
     this.translationEl.firstChild.textContent = translation;
     this.translationEl.hidden = !translation;
-    this.originalEl.firstChild.textContent = original;
+    if (highlighted.length) this.renderWords(originals, highlighted);
+    else this.originalEl.firstChild.textContent = original;
     this.originalEl.hidden = !original;
     this.container.hidden = !translation && !original;
+  }
+
+  // Original lines as word spans; the spoken word of each line gets the highlight class.
+  renderWords(cues, highlighted) {
+    const textEl = this.originalEl.firstChild;
+    textEl.replaceChildren();
+    cues.forEach((cue, line) => {
+      if (line > 0) textEl.append("\n");
+      let word = 0;
+      for (const token of this.timedWords.get(cue).tokens) {
+        if (/^\s/.test(token)) {
+          textEl.append(token);
+          continue;
+        }
+        const span = document.createElement("span");
+        span.textContent = token;
+        if (word === highlighted[line]) span.className = "yt-ceviri-word-active";
+        textEl.append(span);
+        word++;
+      }
+    });
   }
 
   startLoop() {

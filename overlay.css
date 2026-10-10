@@ -49,6 +49,11 @@
   white-space: pre-line;
 }
 
+/* Dual mode: the word being spoken in the original line. */
+.yt-ceviri-word-active {
+  color: var(--yt-ceviri-highlight, #ffd54f);
+}
+
 .yt-ceviri-overlay.has-blur .yt-ceviri-text {
   -webkit-backdrop-filter: blur(8px);
   backdrop-filter: blur(8px);

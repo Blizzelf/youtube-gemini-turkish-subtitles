@@ -106,4 +106,17 @@ const noOverlap = (cues) => cues.every((c, i) => !cues[i + 1] || c.start + c.dur
   console.log("OK 6: 'Dr.' did not split the sentence");
 }
 
+// 7) Every cue keeps one start time per word for highlighting, in order and within the cue.
+{
+  const cues = build(asr([[0, "Hey everybody, it's Rob here. I'm"], [2100, "getting asked a ton of questions."]]));
+  for (const cue of cues) {
+    assert.strictEqual(cue.wordStarts.length, cue.text.split(" ").length, cue.text);
+    assert.ok(cue.wordStarts.every((t, i) => i === 0 || t >= cue.wordStarts[i - 1]), cue.wordStarts.join(","));
+    assert.strictEqual(cue.wordStarts[0], cue.start);
+    assert.ok(cue.wordStarts.every((t) => t <= cue.start + cue.duration), cue.wordStarts.join(","));
+  }
+  assert.deepStrictEqual(cues[1].wordStarts, [1.75, 2.1, 2.45, 2.8, 3.15, 3.5, 3.85]);
+  console.log("OK 7: word start times kept");
+}
+
 console.log("ALL TESTS PASSED");

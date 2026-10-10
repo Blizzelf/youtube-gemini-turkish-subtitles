@@ -163,10 +163,17 @@ function splitLongSentence(words) {
   });
 }
 
-// Builds { start, duration, text } subtitles from the groups. Subtitles never overlap.
+// Builds { start, duration, text, wordStarts } subtitles from the groups. Subtitles never
+// overlap. wordStarts holds each word's start time for word-by-word highlighting (overlay.js);
+// it is not sent for translation.
 function groupsToCues(groups) {
   const cues = groups
-    .map((words) => ({ start: words[0].start, end: words[words.length - 1].end, text: joinWords(words) }))
+    .map((words) => ({
+      start: words[0].start,
+      end: words[words.length - 1].end,
+      text: joinWords(words),
+      wordStarts: words.map((word) => roundTime(word.start)),
+    }))
     .filter((cue) => cue.text);
 
   cues.forEach((cue, i) => {
@@ -180,6 +187,7 @@ function groupsToCues(groups) {
     start: roundTime(cue.start),
     duration: roundTime(Math.max(0, cue.end - cue.start)),
     text: cue.text,
+    wordStarts: cue.wordStarts,
   }));
 }
 

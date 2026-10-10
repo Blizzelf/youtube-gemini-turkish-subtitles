@@ -331,7 +331,14 @@ class SubtitleMenu {
         },
       }),
       this.lineSection("Çeviri", "translation"),
-      this.lineSection("Orijinal", "original", "çift dil modunda"),
+      this.lineSection("Orijinal", "original", "çift dil modunda", [
+        this.switchRow("Kelime kelime vurgulama", () => overlay.settings.wordHighlight, (wordHighlight) =>
+          overlay.updateSettings({ wordHighlight })
+        ),
+        this.colorRow("Vurgu rengi", () => overlay.settings.highlightColor, (highlightColor, options) =>
+          overlay.updateSettings({ highlightColor }, options)
+        ),
+      ]),
       this.section("Diğer", undefined, [
         this.stepperRow("Arka plan opaklığı", SUBTITLE_BACKGROUND_LIMITS, () => overlay.settings.background, (background) =>
           overlay.updateSettings({ background })
@@ -361,7 +368,7 @@ class SubtitleMenu {
   }
 
   // key: "translation" or "original"; the line's settings are replaced as a whole.
-  lineSection(title, key, note) {
+  lineSection(title, key, note, extraRows = []) {
     const overlay = this.overlay;
     const get = () => overlay.settings[key];
     const set = (change, options) => overlay.updateSettings({ [key]: { ...get(), ...change } }, options);
@@ -371,6 +378,7 @@ class SubtitleMenu {
       this.colorRow("Renk", () => get().color, (color, options) => set({ color }, options)),
       this.selectRow("Yazı tipi", fonts, () => get().font, (font) => set({ font }), { fonts: true }),
       this.switchRow("Kalın", () => get().bold, (bold) => set({ bold })),
+      ...extraRows,
     ]);
   }
 
