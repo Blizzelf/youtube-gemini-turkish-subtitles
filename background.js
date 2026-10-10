@@ -20,8 +20,15 @@
 const STORAGE_KEY = "geminiApiKey";
 const LOG_PREFIX = "[YT Çeviri]";
 
-const GEMINI_MODEL = "gemini-3.8-flash";
-const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+// Chosen in the popup (stored under MODEL_KEY). Thinking is set differently per generation:
+// 3.x takes a level, 2.5 a token budget (0 = off, which keeps the cheaper model cheap).
+const MODELS = {
+  "gemini-3.8-flash": { thinkingConfig: { thinkingLevel: "low" } },
+  "gemini-2.5-flash": { thinkingConfig: { thinkingBudget: 0 } },
+};
+const DEFAULT_MODEL = "gemini-3.8-flash";
+const MODEL_KEY = "geminiModel";
+const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 
 // Batching
 const CHUNK_MAX_ITEMS = 40;
@@ -122,6 +129,11 @@ chrome.runtime.onInstalled.addListener((details) => {
   console.log(`${LOG_PREFIX} Extension ${details.reason} (v${chrome.runtime.getManifest().version})`);
 });
 
+async function getModel() {
+  const stored = (await chrome.storage.local.get(MODEL_KEY))[MODEL_KEY];
+  return Object.hasOwn(MODELS, stored) ? stored : DEFAULT_MODEL;
+}
+
 async function getApiKey() {
   const result = await chrome.storage.local.get(STORAGE_KEY);
   return result[STORAGE_KEY] || null;
@@ -131,7 +143,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // --- Gemini request ---
 
-function buildRequestBody(chunk, title) {
+function buildRequestBody(chunk, title, model) {
   const parts = [];
   if (title) parts.push({ text: `Video title (context only; do not include it in the output): ${title}` });
   parts.push({ text: JSON.stringify(chunk) });
@@ -142,7 +154,7 @@ function buildRequestBody(chunk, title) {
     generationConfig: {
       responseMimeType: "application/json",
       responseSchema: RESPONSE_SCHEMA,
-      thinkingConfig: { thinkingLevel: "low" },
+      thinkingConfig: MODELS[model].thinkingConfig,
     },
   };
 }
@@ -178,17 +190,17 @@ function extractResponseText(data) {
     .join("");
 }
 
-async function callGemini(apiKey, chunk, title) {
+async function callGemini(apiKey, chunk, title, model) {
   let response;
   try {
-    response = await fetch(GEMINI_ENDPOINT, {
+    response = await fetch(`${GEMINI_API_BASE}/${model}:generateContent`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         // The key goes in a header instead of the URL so it never shows up in logs or history.
         "x-goog-api-key": apiKey,
       },
-      body: JSON.stringify(buildRequestBody(chunk, title)),
+      body: JSON.stringify(buildRequestBody(chunk, title, model)),
     });
   } catch (error) {
     throw new GeminiApiError(`Ağ hatası: ${error.message}`, { retryable: true });
@@ -317,7 +329,7 @@ async function requestChunk(apiKey, chunk, job) {
       const raw = await enqueueGeminiRequest(() => {
         // Another chunk of this job failed while this request waited; it is not sent.
         if (job.error) throw new JobStoppedError();
-        return callGemini(apiKey, chunk, job.title);
+        return callGemini(apiKey, chunk, job.title, job.model);
       });
       return parseTranslatedTexts(chunk, raw);
     } catch (error) {
@@ -410,12 +422,13 @@ function hashCaptions(captions, language) {
   return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
+// A translation made with any model is reused, so switching models in the popup keeps the
+// cache; the model is stored for information only.
 async function readTranslation(videoId, hash, count) {
   const key = CACHE_PREFIX + videoId;
   const entry = (await chrome.storage.local.get(key))[key];
   const valid =
     entry?.version === CACHE_VERSION &&
-    entry.model === GEMINI_MODEL &&
     entry.hash === hash &&
     Array.isArray(entry.texts) &&
     entry.texts.length === count;
@@ -456,7 +469,7 @@ async function storeEntries(entries) {
 function saveTranslation(job) {
   const entry = {
     version: CACHE_VERSION,
-    model: GEMINI_MODEL,
+    model: job.model,
     hash: job.hash,
     texts: job.texts,
     complete: job.texts.every((text) => text !== null),
@@ -509,7 +522,7 @@ function isWellFormedEntry(videoId, entry) {
 }
 
 // Adds translations exported from another browser. Videos already fully translated in this
-// browser are kept; translations made with a different cache version or model are skipped.
+// browser are kept; translations made with a different cache version are skipped.
 function importTranslationCache(data) {
   if (data?.format !== EXPORT_FORMAT || !data.entries || typeof data.entries !== "object") {
     throw new Error("Dosya bu eklentinin dışa aktarma dosyası değil.");
@@ -527,7 +540,7 @@ function importTranslationCache(data) {
         stats.invalid++;
         continue;
       }
-      if (entry.version !== CACHE_VERSION || entry.model !== GEMINI_MODEL) {
+      if (entry.version !== CACHE_VERSION) {
         stats.incompatible++;
         continue;
       }
@@ -541,7 +554,7 @@ function importTranslationCache(data) {
 
       accepted[videoId] = {
         version: CACHE_VERSION,
-        model: GEMINI_MODEL,
+        model: Object.hasOwn(MODELS, entry.model) ? entry.model : null,
         hash: entry.hash,
         texts: entry.texts,
         complete,
@@ -565,7 +578,7 @@ async function hasTranslation(videoId) {
   }
   const key = CACHE_PREFIX + videoId;
   const entry = (await chrome.storage.local.get(key))[key];
-  return entry?.version === CACHE_VERSION && entry.model === GEMINI_MODEL && entry.complete === true;
+  return entry?.version === CACHE_VERSION && entry.complete === true;
 }
 
 // Marks an entry read from the cache as most recently used.
@@ -658,9 +671,10 @@ function setPriority(job, time) {
   job.chunks = createChunks(job);
 }
 
-function startJob({ apiKey, key, videoId, title, captions, hash, texts, priorityTime, target }) {
+function startJob({ apiKey, model, key, videoId, title, captions, hash, texts, priorityTime, target }) {
   const job = {
     videoId,
+    model,
     title,
     captions,
     hash,
@@ -680,7 +694,7 @@ function startJob({ apiKey, key, videoId, title, captions, hash, texts, priority
   const { done, total } = progressOf(job);
   console.log(
     `${LOG_PREFIX} Translation ${done ? "resumed" : "started"}: videoId=${videoId}, ` +
-      `${captions.length} lines, ${done}/${total} chunks ready, model=${GEMINI_MODEL}`
+      `${captions.length} lines, ${done}/${total} chunks ready, model=${model}`
   );
 
   runJob(job, apiKey)
@@ -788,9 +802,10 @@ async function startOrLoadTranslation({ message, videoId, captions, hash, key, t
     };
   }
 
-  // 2) An interrupted translation resumes where it stopped.
+  // 2) An interrupted translation resumes where it stopped, with the model chosen now.
   const job = startJob({
     apiKey,
+    model: await getModel(),
     key,
     videoId,
     title: typeof message.title === "string" ? message.title : "",

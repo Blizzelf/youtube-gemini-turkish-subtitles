@@ -150,6 +150,37 @@ test("first chunk: 10 lines starting at the line playing now", async () => {
   assert.deepStrictEqual(gemini.calls.map((c) => [c.chunk[0].text, c.chunk.length]), [["line 50", 10], ["line 60", 40], ["line 0", 40], ["line 40", 10]]);
 });
 
+test("model: the model chosen in the popup is used, with its own thinking setting", async () => {
+  const gemini = makeGemini();
+  const storage = makeStorage({ geminiApiKey: "k", geminiModel: "gemini-2.5-flash" });
+  const { sent, send } = makeContext({ gemini, storage });
+  await send(translate("v1", cues(10)));
+  await waitFor(() => sent.some((m) => m.type === "TRANSLATION_RESULT"));
+  assert.ok(gemini.calls[0].url.endsWith("/gemini-2.5-flash:generateContent"), gemini.calls[0].url);
+  assert.deepStrictEqual(gemini.calls[0].body.generationConfig.thinkingConfig, { thinkingBudget: 0 });
+  assert.strictEqual(storage.data["translation:v1"].model, "gemini-2.5-flash");
+
+  storage.data.geminiModel = "toString"; // Unknown values fall back to the default model
+  await send(translate("v2", cues(10)));
+  await waitFor(() => sent.filter((m) => m.type === "TRANSLATION_RESULT").length === 2);
+  assert.ok(gemini.calls[1].url.endsWith("/gemini-3.8-flash:generateContent"), gemini.calls[1].url);
+  assert.deepStrictEqual(gemini.calls[1].body.generationConfig.thinkingConfig, { thinkingLevel: "low" });
+});
+
+test("model: translations made with another model are kept after switching", async () => {
+  const gemini = makeGemini();
+  const storage = makeStorage({ geminiApiKey: "k", geminiModel: "gemini-2.5-flash" });
+  const { sent, send } = makeContext({ gemini, storage });
+  await send(translate("v1", cues(10)));
+  await waitFor(() => sent.some((m) => m.type === "TRANSLATION_RESULT"));
+  delete storage.data.geminiModel; // Back to the default model
+  const calls = gemini.calls.length;
+  assert.strictEqual((await send({ type: "HAS_TRANSLATION", videoId: "v1" })).available, true);
+  const ack = await send(translate("v1", cues(10)));
+  assert.strictEqual(ack.status, "cached");
+  assert.strictEqual(gemini.calls.length, calls);
+});
+
 test("batching: long lines are split by the character limit", async () => {
   const gemini = makeGemini();
   const { sent, send } = makeContext({ gemini });
@@ -518,7 +549,8 @@ test("import: malformed, incompatible and partial entries are handled correctly"
     entries: {
       "bad id!": { ...base, hash: "x", texts: ["a"] }, // invalid videoId
       noTexts0001: { ...base, hash: "x", texts: "nope" }, // malformed
-      oldModel001: { ...base, model: "gemini-2.5-flash", hash: "x", texts: ["a"] }, // incompatible
+      oldVersion1: { ...base, version: 0, hash: "x", texts: ["a"] }, // incompatible cache version
+      otherModel1: { ...base, model: "gemini-2.5-flash", hash: "y", texts: ["TR a"] }, // another model is fine
       localFull01: { ...base, hash: localHash, texts: new Array(10).fill(null) }, // the complete local entry is kept
       partial0001: { ...base, hash: "abc", texts: ["TR a", null] }, // a partial entry is added
     },
@@ -526,8 +558,9 @@ test("import: malformed, incompatible and partial entries are handled correctly"
   const result = await send({ type: "IMPORT_TRANSLATION_CACHE", data: file });
   assert.deepStrictEqual(
     [result.imported, result.existing, result.incompatible, result.invalid],
-    [1, 1, 1, 2]
+    [2, 1, 1, 2]
   );
+  assert.strictEqual(storage.data["translation:otherModel1"].model, "gemini-2.5-flash");
   assert.strictEqual(storage.data["translation:localFull01"].complete, true);
   assert.strictEqual(storage.data["translation:partial0001"].complete, false);
 

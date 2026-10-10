@@ -1,10 +1,11 @@
-// Popup: saves the user's Gemini API key and the auto-translate option to chrome.storage.local,
-// and shows, clears, exports and imports the translation cache (the cache belongs to
-// background.js; requested by message).
+// Popup: saves the user's Gemini API key, the model and the auto-translate option to
+// chrome.storage.local, and shows, clears, exports and imports the translation cache (the cache
+// belongs to background.js; requested by message).
 // The saved key is never written back into the input; only a masked form is shown.
 // All strings in this file are shown to the user, so they are Turkish.
 
 const STORAGE_KEY = "geminiApiKey";
+const MODEL_KEY = "geminiModel"; // Read by background.js; the first option is its default
 const AUTO_TRANSLATE_KEY = "autoTranslate"; // Read by content.js; off by default
 const CLEAR_CONFIRM_MS = 4000; // How long the "Emin misiniz?" (are you sure?) state lasts
 const IMPORT_MAX_BYTES = 20 * 1024 * 1024;
@@ -20,6 +21,7 @@ const els = {
   saveBtn: document.getElementById("saveBtn"),
   deleteBtn: document.getElementById("deleteBtn"),
   message: document.getElementById("message"),
+  model: document.getElementById("model"),
   autoTranslate: document.getElementById("autoTranslate"),
   cacheStats: document.getElementById("cacheStats"),
   clearCacheBtn: document.getElementById("clearCacheBtn"),
@@ -109,6 +111,25 @@ function toggleVisibility() {
   els.input.type = hidden ? "text" : "password";
   els.toggleBtn.textContent = hidden ? "Gizle" : "Göster";
   els.toggleBtn.setAttribute("aria-label", hidden ? "Anahtarı gizle" : "Anahtarı göster");
+}
+
+// --- Model (applies to translations started after the change) ---
+
+async function loadModel() {
+  try {
+    const stored = (await chrome.storage.local.get(MODEL_KEY))[MODEL_KEY];
+    if ([...els.model.options].some((option) => option.value === stored)) els.model.value = stored;
+  } catch (error) {
+    showMessage(`Ayar okunamadı: ${error?.message || error}`, "error");
+  }
+}
+
+async function saveModel() {
+  try {
+    await chrome.storage.local.set({ [MODEL_KEY]: els.model.value });
+  } catch (error) {
+    showMessage(`Ayar kaydedilemedi: ${error?.message || error}`, "error");
+  }
 }
 
 // --- Auto-translate option (applies to videos opened after the change) ---
@@ -206,7 +227,7 @@ function startImport() {
 function describeImport(result) {
   const parts = [`${result.imported} videonun çevirisi içe aktarıldı.`];
   if (result.existing) parts.push(`${result.existing} video bu tarayıcıda zaten vardı.`);
-  if (result.incompatible) parts.push(`${result.incompatible} kayıt farklı sürüm veya modelle yapıldığı için atlandı.`);
+  if (result.incompatible) parts.push(`${result.incompatible} kayıt eklentinin farklı bir sürümüyle yapıldığı için atlandı.`);
   if (result.invalid) parts.push(`${result.invalid} bozuk kayıt atlandı.`);
   if (result.evicted) parts.push(`Yer açmak için en eski ${result.evicted} çeviri silindi.`);
   return parts.join(" ");
@@ -276,6 +297,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (event.key === "Enter") saveKey();
   });
   els.input.addEventListener("input", () => showMessage(""));
+  els.model.addEventListener("change", saveModel);
   els.autoTranslate.addEventListener("change", saveAutoTranslate);
   els.clearCacheBtn.addEventListener("click", clearCache);
   els.exportBtn.addEventListener("click", exportCache);
@@ -291,6 +313,7 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   loadStatus();
+  loadModel();
   loadAutoTranslate();
   loadCacheStats();
 });
