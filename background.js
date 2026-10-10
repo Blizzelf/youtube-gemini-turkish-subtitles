@@ -6,11 +6,12 @@
 // 1. Cache: if the video was fully translated before, the API is not called at all. If a
 //    translation was interrupted, the finished part is sent right away and work resumes.
 // 2. Batching: captions are split into chunks of at most 40 lines / 6000 characters.
-// 3. Queue: all Gemini requests (for every tab) go through a single serial queue with at
-//    least 2.5 s between them. On 429 the queue pauses and the chunk is retried with
-//    exponential backoff.
+// 3. Queue: all Gemini requests (for every tab) share one queue. Up to 3 run at once and
+//    starts are at least 0.5 s apart. After the first 429 (e.g. on the free tier) it drops to
+//    one request at a time, 2.5 s apart, until the browser closes. On 429 the queue pauses
+//    and the chunk is retried with exponential backoff.
 // 4. Each finished chunk is sent to the tab and written to the cache. The chunk at the
-//    current playback position is translated first.
+//    current playback position is translated first, then the ones after it.
 //
 // Strings shown to the user (overlay, popup) are Turkish; log messages are English.
 
@@ -28,7 +29,10 @@ const MAX_CUES = 5000;
 const TIMESTAMP_TOLERANCE = 0.01; // seconds
 
 // Queue and retries
-const MIN_REQUEST_INTERVAL_MS = 2500; // Minimum gap between two consecutive requests
+const MAX_PARALLEL_REQUESTS = 3; // Requests in flight at once (one after a 429)
+const MIN_REQUEST_INTERVAL_MS = 500; // Minimum gap between two request starts
+const SLOW_REQUEST_INTERVAL_MS = 2500; // Gap once a 429 shows a tight rate limit (free tier)
+const RATE_LIMITED_KEY = "rateLimited"; // chrome.storage.session: kept across worker restarts
 const MAX_ATTEMPTS = 8; // Total attempts per chunk on transient errors (429, 5xx, network)
 const BACKOFF_BASE_MS = 4000; // 4, 8, 16, 32, 60, 60… s
 const BACKOFF_MAX_MS = 60000;
@@ -107,6 +111,9 @@ class TranslationFormatError extends Error {
     this.name = "TranslationFormatError";
   }
 }
+
+// A queued request whose job has already failed; it is dropped without being sent.
+class JobStoppedError extends Error {}
 
 chrome.runtime.onInstalled.addListener((details) => {
   console.log(`${LOG_PREFIX} Extension ${details.reason} (v${chrome.runtime.getManifest().version})`);
@@ -227,23 +234,67 @@ function parseTranslatedTexts(chunk, rawText) {
 
 // --- Request queue (throttling) ---
 
-// Every Gemini request runs through this chain one at a time; only one request is in flight.
-let requestQueue = Promise.resolve();
+// Requests start one at a time and in order through this chain; up to requestSlots of them
+// then run at once.
+let startQueue = Promise.resolve();
+let activeRequests = 0;
+let slotWaiter = null; // Resolves the request waiting for a free slot (only one waits at a time)
 // Earliest moment the next request may start. Pushed forward after a 429; every job waits.
 let nextRequestAt = 0;
+// Paid keys can go fast. After a 429 the queue drops to one request at a time with the slower
+// gap; this is remembered until the browser closes (chrome.storage.session).
+let requestSlots = MAX_PARALLEL_REQUESTS;
+let requestInterval = MIN_REQUEST_INTERVAL_MS;
+
+function slowDown() {
+  requestSlots = 1;
+  requestInterval = SLOW_REQUEST_INTERVAL_MS;
+}
+
+chrome.storage.session
+  .get(RATE_LIMITED_KEY)
+  .then((stored) => {
+    if (stored[RATE_LIMITED_KEY]) slowDown();
+  })
+  .catch(() => {});
+
+function onRateLimited() {
+  if (requestSlots === 1 && requestInterval === SLOW_REQUEST_INTERVAL_MS) return;
+  console.warn(`${LOG_PREFIX} Rate limited; switching to one request at a time.`);
+  slowDown();
+  chrome.storage.session.set({ [RATE_LIMITED_KEY]: true }).catch(() => {});
+}
+
+async function waitForRequestSlot() {
+  for (;;) {
+    if (activeRequests >= requestSlots) {
+      await new Promise((resolve) => {
+        slotWaiter = resolve;
+      });
+      continue;
+    }
+    const wait = nextRequestAt - Date.now();
+    if (wait <= 0) break;
+    await sleep(wait); // The time may have moved (429) or the slots dropped meanwhile; check again.
+  }
+  activeRequests++;
+  nextRequestAt = Math.max(nextRequestAt, Date.now() + requestInterval);
+}
 
 function enqueueGeminiRequest(task) {
-  const run = requestQueue.then(async () => {
-    const wait = nextRequestAt - Date.now();
-    if (wait > 0) await sleep(wait);
+  const started = startQueue.then(waitForRequestSlot);
+  startQueue = started.catch(() => {});
+  return started.then(async () => {
     try {
       return await task();
     } finally {
-      nextRequestAt = Math.max(nextRequestAt, Date.now() + MIN_REQUEST_INTERVAL_MS);
+      activeRequests--;
+      nextRequestAt = Math.max(nextRequestAt, Date.now() + requestInterval);
+      const waiter = slotWaiter;
+      slotWaiter = null;
+      waiter?.();
     }
   });
-  requestQueue = run.catch(() => {});
-  return run;
 }
 
 function pauseQueue(ms) {
@@ -260,11 +311,16 @@ function backoffDelay(attempt, retryAfterMs) {
 async function requestChunk(apiKey, chunk, job) {
   for (let attempt = 1; ; attempt++) {
     try {
-      const raw = await enqueueGeminiRequest(() => callGemini(apiKey, chunk, job.title));
+      const raw = await enqueueGeminiRequest(() => {
+        // Another chunk of this job failed while this request waited; it is not sent.
+        if (job.error) throw new JobStoppedError();
+        return callGemini(apiKey, chunk, job.title);
+      });
       return parseTranslatedTexts(chunk, raw);
     } catch (error) {
       if (!(error instanceof GeminiApiError) || !error.retryable || attempt >= MAX_ATTEMPTS) throw error;
 
+      if (error.status === 429) onRateLimited();
       const delay = backoffDelay(attempt, error.retryAfterMs);
       pauseQueue(delay);
       // Shown to the user in the overlay, so it stays Turkish.
@@ -539,8 +595,9 @@ function progressOf(job) {
 }
 
 // The chunk containing (or following) the playback position goes first, then the earlier ones.
+// Chunks another worker is translating are skipped.
 function pickNextChunk(job) {
-  const pending = job.chunks.filter((chunk) => !isChunkDone(job, chunk));
+  const pending = job.chunks.filter((chunk) => !isChunkDone(job, chunk) && !job.inFlight.has(chunk));
   if (!pending.length) return null;
   return (
     pending.find((chunk) => {
@@ -550,17 +607,32 @@ function pickNextChunk(job) {
   );
 }
 
-async function runJob(job, apiKey) {
+// Each worker translates one chunk at a time. Workers beyond the current slot count stop after
+// their chunk, so after a 429 only one chunk is claimed at a time and seeking still takes effect.
+async function runWorker(job, apiKey, index) {
   let chunk;
-  while ((chunk = pickNextChunk(job))) {
-    const texts = await translateChunk(apiKey, job.captions.slice(chunk.start, chunk.end), job);
-    texts.forEach((text, i) => {
-      job.texts[chunk.start + i] = text;
-    });
-    // Partial progress is saved too, so an interrupted translation resumes from here.
-    await saveTranslation(job);
-    job.notify({ type: "TRANSLATION_CHUNK", startIndex: chunk.start, texts, ...progressOf(job) });
+  while (!job.error && index < requestSlots && (chunk = pickNextChunk(job))) {
+    job.inFlight.add(chunk);
+    try {
+      const texts = await translateChunk(apiKey, job.captions.slice(chunk.start, chunk.end), job);
+      texts.forEach((text, i) => {
+        job.texts[chunk.start + i] = text;
+      });
+      // Partial progress is saved too, so an interrupted translation resumes from here.
+      await saveTranslation(job);
+      job.notify({ type: "TRANSLATION_CHUNK", startIndex: chunk.start, texts, ...progressOf(job) });
+    } catch (error) {
+      job.error ??= error; // The first error stops the job; queued requests are dropped.
+    } finally {
+      job.inFlight.delete(chunk);
+    }
   }
+}
+
+// The error is reported only after every worker has stopped, so no chunk message arrives after it.
+async function runJob(job, apiKey) {
+  await Promise.all(Array.from({ length: MAX_PARALLEL_REQUESTS }, (_, index) => runWorker(job, apiKey, index)));
+  if (job.error) throw job.error;
 }
 
 function startJob({ apiKey, key, videoId, title, captions, hash, texts, priorityTime, target }) {
@@ -572,6 +644,8 @@ function startJob({ apiKey, key, videoId, title, captions, hash, texts, priority
     texts,
     priorityTime,
     chunks: createChunks(captions),
+    inFlight: new Set(), // Chunks a worker is translating
+    error: null, // First error; stops the job
     targets: new Set([target]),
   };
   job.notify = (message) => notifyTargets(job.targets, { videoId, ...message });

@@ -8,16 +8,19 @@ const assert = require("assert");
 
 const SOURCE = fs.readFileSync(path.join(__dirname, "..", "background.js"), "utf8");
 const INTERVAL_MS = 40;
+const SLOW_INTERVAL_MS = 80;
 
 // Shortens the timing constants so the tests run in milliseconds.
 function patched({ cacheMaxBytes } = {}) {
-  let src = SOURCE.replace("MIN_REQUEST_INTERVAL_MS = 2500", `MIN_REQUEST_INTERVAL_MS = ${INTERVAL_MS}`)
+  let src = SOURCE.replace("MIN_REQUEST_INTERVAL_MS = 500", `MIN_REQUEST_INTERVAL_MS = ${INTERVAL_MS}`)
+    .replace("SLOW_REQUEST_INTERVAL_MS = 2500", `SLOW_REQUEST_INTERVAL_MS = ${SLOW_INTERVAL_MS}`)
     .replace("BACKOFF_BASE_MS = 4000", "BACKOFF_BASE_MS = 20")
     .replace("BACKOFF_MAX_MS = 60000", "BACKOFF_MAX_MS = 100")
     .replace("BACKOFF_JITTER_MS = 1000", "BACKOFF_JITTER_MS = 0");
   if (cacheMaxBytes) src = src.replace("CACHE_MAX_BYTES = 8 * 1024 * 1024", `CACHE_MAX_BYTES = ${cacheMaxBytes}`);
-  for (const name of ["MIN_REQUEST_INTERVAL_MS", "BACKOFF_BASE_MS", "BACKOFF_JITTER_MS"]) {
-    assert.ok(!src.includes(`${name} = ${{ MIN_REQUEST_INTERVAL_MS: 2500, BACKOFF_BASE_MS: 4000, BACKOFF_JITTER_MS: 1000 }[name]}`), `${name} not patched`);
+  const originals = { MIN_REQUEST_INTERVAL_MS: 500, SLOW_REQUEST_INTERVAL_MS: 2500, BACKOFF_BASE_MS: 4000, BACKOFF_JITTER_MS: 1000 };
+  for (const [name, value] of Object.entries(originals)) {
+    assert.ok(!src.includes(`${name} = ${value};`), `${name} not patched`);
   }
   return src;
 }
@@ -43,7 +46,7 @@ function makeStorage(initial = {}) {
 
 // Fake Gemini: returns the incoming lines prefixed with "TR ". behavior(callIndex, chunk) can
 // return a custom response.
-function makeGemini(behavior = () => null) {
+function makeGemini(behavior = () => null, { latencyMs = 5 } = {}) {
   const state = { calls: [], inFlight: 0, maxInFlight: 0 };
   state.fetch = async (url, init) => {
     const body = JSON.parse(init.body);
@@ -53,7 +56,7 @@ function makeGemini(behavior = () => null) {
     state.calls.push(call);
     state.inFlight++;
     state.maxInFlight = Math.max(state.maxInFlight, state.inFlight);
-    await new Promise((r) => setTimeout(r, 5));
+    await new Promise((r) => setTimeout(r, latencyMs));
     state.inFlight--;
     const custom = behavior(state.calls.length, chunk);
     if (custom) return custom;
@@ -67,7 +70,7 @@ function makeGemini(behavior = () => null) {
   return state;
 }
 
-function makeContext({ gemini, storage = makeStorage({ geminiApiKey: "AIzaTESTKEY" }), cacheMaxBytes } = {}) {
+function makeContext({ gemini, storage = makeStorage({ geminiApiKey: "AIzaTESTKEY" }), session = makeStorage(), cacheMaxBytes } = {}) {
   const sent = [];
   const ctx = {
     console: { log() {}, warn() {}, error() {} },
@@ -81,7 +84,7 @@ function makeContext({ gemini, storage = makeStorage({ geminiApiKey: "AIzaTESTKE
         getManifest: () => ({ version: "0.1.0" }),
         getPlatformInfo: async () => ({}),
       },
-      storage: { local: storage },
+      storage: { local: storage, session },
       tabs: { sendMessage: async (tabId, message) => { sent.push(JSON.parse(JSON.stringify(message))); } },
     },
   };
@@ -89,7 +92,7 @@ function makeContext({ gemini, storage = makeStorage({ geminiApiKey: "AIzaTESTKE
   vm.runInContext(patched({ cacheMaxBytes }), ctx);
   const send = (message, tabId = 7) =>
     new Promise((resolve) => ctx.__listener(message, { id: "ext", tab: { id: tabId }, frameId: 0 }, (r) => resolve(JSON.parse(JSON.stringify(r)))));
-  return { ctx, sent, storage, send };
+  return { ctx, sent, storage, session, send };
 }
 
 async function waitFor(predicate, timeoutMs = 3000) {
@@ -109,7 +112,7 @@ const types = (sent) => sent.map((m) => m.type);
 const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
 
-test("batching: 100 lines -> 40/40/20, serial queue with a gap between requests", async () => {
+test("batching: 100 lines -> 40/40/20", async () => {
   const gemini = makeGemini();
   const { sent, send } = makeContext({ gemini });
   const ack = await send(translate("v1", cues(100)));
@@ -118,12 +121,23 @@ test("batching: 100 lines -> 40/40/20, serial queue with a gap between requests"
   await waitFor(() => sent.some((m) => m.type === "TRANSLATION_RESULT"));
 
   assert.deepStrictEqual(gemini.calls.map((c) => c.chunk.length), [40, 40, 20]);
-  assert.strictEqual(gemini.maxInFlight, 1, "there must never be more than one request in flight");
-  for (let i = 1; i < gemini.calls.length; i++) {
-    assert.ok(gemini.calls[i].at - gemini.calls[i - 1].at >= INTERVAL_MS, `request gap: ${gemini.calls[i].at - gemini.calls[i - 1].at} ms`);
-  }
   assert.ok(gemini.calls[0].url.includes("gemini-3.8-flash:generateContent"));
   assert.strictEqual(gemini.calls[0].headers["x-goog-api-key"], "AIzaTESTKEY");
+});
+
+test("parallel: at most 3 requests in flight, starts spaced by the interval", async () => {
+  const gemini = makeGemini(undefined, { latencyMs: 150 });
+  const { sent, send } = makeContext({ gemini });
+  await send(translate("v1", cues(200)));
+  await waitFor(() => sent.some((m) => m.type === "TRANSLATION_RESULT"));
+
+  assert.strictEqual(gemini.calls.length, 5);
+  assert.strictEqual(gemini.maxInFlight, 3);
+  // The gap is kept between slot grants; fetch is called a moment later, hence 2 ms of slack.
+  for (let i = 1; i < gemini.calls.length; i++) {
+    assert.ok(gemini.calls[i].at - gemini.calls[i - 1].at >= INTERVAL_MS - 2, `start gap: ${gemini.calls[i].at - gemini.calls[i - 1].at} ms`);
+  }
+  assert.strictEqual(sent.at(-1).texts.filter((t) => t === null).length, 0);
 });
 
 test("batching: long lines are split by the character limit", async () => {
@@ -265,6 +279,33 @@ test("429: the delay grows exponentially on repeated errors", async () => {
   assert.ok(gaps[2] > gaps[0], gaps.join(","));
 });
 
+test("429: the queue keeps the slower gap after a rate limit", async () => {
+  const gemini = makeGemini((call) =>
+    call === 1 ? { ok: false, status: 429, json: async () => ({ error: { message: "Too many requests" } }) } : null
+  );
+  const { sent, send } = makeContext({ gemini });
+  await send(translate("v1", cues(100)));
+  await waitFor(() => sent.some((m) => m.type === "TRANSLATION_RESULT"));
+  assert.strictEqual(gemini.calls.length, 4);
+  const gaps = gemini.calls.slice(2).map((c, i) => c.at - gemini.calls[i + 1].at);
+  assert.ok(gaps.every((gap) => gap >= SLOW_INTERVAL_MS), gaps.join(","));
+});
+
+test("429: one request at a time afterwards, remembered across worker restarts", async () => {
+  const rateLimited = { ok: false, status: 429, json: async () => ({ error: { message: "Too many requests" } }) };
+  const first = makeContext({ gemini: makeGemini((call) => (call === 1 ? rateLimited : null)) });
+  await first.send(translate("v1", cues(10)));
+  await waitFor(() => first.sent.some((m) => m.type === "TRANSLATION_RESULT"));
+  assert.strictEqual(first.session.data.rateLimited, true);
+
+  const gemini = makeGemini(undefined, { latencyMs: 60 });
+  const second = makeContext({ gemini, session: first.session });
+  await new Promise((r) => setTimeout(r, 5)); // Let the stored flag load.
+  await second.send(translate("v2", cues(200)));
+  await waitFor(() => second.sent.some((m) => m.type === "TRANSLATION_RESULT"));
+  assert.strictEqual(gemini.maxInFlight, 1);
+});
+
 test("daily quota: not retried, error message explains it", async () => {
   const gemini = makeGemini(() => ({
     ok: false,
@@ -293,6 +334,7 @@ test("an interrupted translation is saved and resumes where it stopped", async (
   await first.send(translate("v1", cues(100)));
   await waitFor(() => first.sent.some((m) => m.type === "TRANSLATION_ERROR"));
   assert.strictEqual(first.sent.at(-1).partial, true);
+  assert.strictEqual(gemini.calls.length, 2, "the queued third chunk must not be sent after the error");
   const entry = storage.data["translation:v1"];
   assert.strictEqual(entry.complete, false);
   assert.strictEqual(entry.texts.filter((t) => t !== null).length, 40);
@@ -310,14 +352,14 @@ test("an interrupted translation is saved and resumes where it stopped", async (
 });
 
 test("priority: the chunk at the playback position goes first; seeking moves the new position up", async () => {
-  const gemini = makeGemini();
+  const gemini = makeGemini(undefined, { latencyMs: 100 });
   const { sent, send } = makeContext({ gemini });
-  // 160 lines, 2 s apart: chunks cover 0-78 s, 80-158 s, 160-238 s, 240-318 s
-  await send(translate("v1", cues(160), { currentTime: 100 }));
+  // 320 lines, 2 s apart: 8 chunks starting at 0, 80, 160, ... 560 s. Three are claimed at once.
+  await send(translate("v1", cues(320), { currentTime: 100 }));
   await waitFor(() => gemini.calls.length >= 1);
-  await send({ type: "TRANSLATION_PRIORITY", videoId: "v1", time: 250 });
+  await send({ type: "TRANSLATION_PRIORITY", videoId: "v1", time: 500 });
   await waitFor(() => sent.some((m) => m.type === "TRANSLATION_RESULT"));
-  assert.deepStrictEqual(gemini.calls.map((c) => c.chunk[0].start), [80, 240, 0, 160]);
+  assert.deepStrictEqual(gemini.calls.map((c) => c.chunk[0].start), [80, 160, 240, 480, 560, 0, 320, 400]);
 });
 
 test("the same video requested from two tabs runs one job and both tabs get the result", async () => {
