@@ -11,6 +11,10 @@
 
 A Chrome / Edge extension (Manifest V3) that translates YouTube captions into Turkish with Google Gemini and shows them as subtitles on the video.
 
+<p align="center">
+  <img src="docs/images/player.webp" width="800" alt="Turkish subtitles and the extension's menu on a YouTube video">
+</p>
+
 > [Türkçe açıklama aşağıda.](#türkçe)
 
 ## Features
@@ -32,14 +36,24 @@ A Chrome / Edge extension (Manifest V3) that translates YouTube captions into Tu
 2. Open `chrome://extensions` (or `edge://extensions` in Edge).
 3. Turn on **Developer mode**.
 4. Click **Load unpacked** and select the project folder.
+
+   <img src="docs/images/extensions.png" width="700" alt="chrome://extensions with Developer mode on and the extension loaded">
+
 5. Get a Gemini API key from [Google AI Studio](https://aistudio.google.com/app/apikey).
 6. Click the extension icon and save your key in the popup.
+
+   <img src="docs/images/popup.png" width="300" alt="The popup with the API key, model and cache settings">
 
 Requires Chrome / Edge 111 or newer.
 
 ## Usage
 
 Open a YouTube video that has captions, click the extension's logo button at the right end of the control bar and turn on **Türkçe altyazı**. The button pulses while the translation is prepared, and Turkish subtitles appear as chunks finish. Use the same switch to hide or show them; while they are on, YouTube's own captions are hidden. If something fails before any subtitle appears (for example a missing API key), turn the switch on again to retry. **Altyazı ayarları** in the menu changes how the subtitles look.
+
+<p align="center">
+  <img src="docs/images/menu.png" width="380" alt="The menu of the extension's button on the player">
+  <img src="docs/images/settings.png" width="300" alt="The subtitle settings view">
+</p>
 
 Videos you translated before show their subtitles without a click. To translate one again with the other model, open it and choose **Bu videoyu yeniden çevir** in the menu or the popup. To translate every video as soon as it opens, turn on **Videoları otomatik çevir** in the popup.
 
@@ -106,6 +120,11 @@ YouTube altyazılarını Google Gemini ile Türkçeye çevirip videonun üstünd
 1. Depoyu indirin.
 2. `chrome://extensions` (Edge'de `edge://extensions`) sayfasını açın ve **Geliştirici modu**'nu açın.
 3. **Paketlenmemiş öğe yükle** ile proje klasörünü seçin.
+
+   <img src="docs/images/extensions.png" width="700" alt="Geliştirici modu açık ve eklenti yüklenmiş chrome://extensions sayfası">
+
 4. [Google AI Studio](https://aistudio.google.com/app/apikey)'dan bir Gemini API anahtarı alın ve eklenti popup'ına kaydedin.
+
+   <img src="docs/images/popup.png" width="300" alt="API anahtarı, model ve önbellek ayarlarının olduğu popup">
 
 API anahtarınız yalnızca tarayıcınızda saklanır ve yalnızca Gemini API'sine gönderilir.
