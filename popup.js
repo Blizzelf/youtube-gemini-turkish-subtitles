@@ -208,7 +208,7 @@ async function retranslate() {
   try {
     const result = await chrome.tabs.sendMessage(videoTabId, { type: "RETRANSLATE" });
     if (!result?.ok) throw new Error(result?.error || "yanıt yok");
-    showRetranslateMessage("Yeniden çeviri başladı. İlerlemeyi videodaki TR butonunda görebilirsiniz.", "success");
+    showRetranslateMessage("Yeniden çeviri başladı. İlerlemeyi videodaki logo butonunda görebilirsiniz.", "success");
   } catch (error) {
     showRetranslateMessage(`Başlatılamadı: ${error?.message || error}`, "error");
     els.retranslateBtn.disabled = false;
