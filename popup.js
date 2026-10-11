@@ -1,7 +1,8 @@
 // Popup: saves the user's Gemini API key, the model and the auto-translate option to
 // chrome.storage.local, re-translates the video open in the active tab (via its content script),
 // and shows, clears, exports and imports the translation cache (the cache belongs to
-// background.js; requested by message).
+// background.js; requested by message). When the browser withholds YouTube from the extension,
+// it shows a warning with a button that asks for the access.
 // The saved key is never written back into the input; only a masked form is shown.
 // All strings in this file are shown to the user, so they are Turkish.
 
@@ -10,12 +11,16 @@ const MODEL_KEY = "geminiModel"; // Read by background.js; the first option is i
 const AUTO_TRANSLATE_KEY = "autoTranslate"; // Read by content.js; off by default
 const CLEAR_CONFIRM_MS = 4000; // How long the "Emin misiniz?" (are you sure?) state lasts
 const IMPORT_MAX_BYTES = 20 * 1024 * 1024;
+const YOUTUBE_ORIGIN = "https://www.youtube.com/*"; // The content scripts' match pattern
 
 // Import happens in a tab: the popup can close when the file picker opens.
 const params = new URLSearchParams(location.search);
 const isTabView = params.get("view") === "tab";
 
 const els = {
+  accessWarning: document.getElementById("accessWarning"),
+  grantAccessBtn: document.getElementById("grantAccessBtn"),
+  accessMessage: document.getElementById("accessMessage"),
   status: document.getElementById("status"),
   input: document.getElementById("apiKey"),
   toggleBtn: document.getElementById("toggleBtn"),
@@ -116,6 +121,44 @@ function toggleVisibility() {
   els.input.type = hidden ? "text" : "password";
   els.toggleBtn.textContent = hidden ? "Gizle" : "Göster";
   els.toggleBtn.setAttribute("aria-label", hidden ? "Anahtarı gizle" : "Anahtarı göster");
+}
+
+// --- YouTube site access ---
+// With site access set to "on click" the browser withholds YouTube, so the content scripts
+// do not run there. The manifest already lists the site (content script matches), so
+// permissions.request may ask for it again; once the user allows it, it stays granted.
+
+function showAccessMessage(text, type) {
+  els.accessMessage.textContent = text;
+  els.accessMessage.className = `message ${type || ""}`.trim();
+}
+
+async function loadAccess() {
+  try {
+    els.accessWarning.hidden = await chrome.permissions.contains({ origins: [YOUTUBE_ORIGIN] });
+  } catch {
+    els.accessWarning.hidden = true;
+  }
+}
+
+// The request must start inside the click (user gesture), so nothing is awaited before it.
+// The popup can close while the browser's dialog is open; the hint above the button already
+// says what to do next, and background.js clears the badge once access is granted.
+async function requestAccess() {
+  els.grantAccessBtn.disabled = true;
+  try {
+    const granted = await chrome.permissions.request({ origins: [YOUTUBE_ORIGIN] });
+    if (granted) {
+      els.grantAccessBtn.hidden = true;
+      showAccessMessage("İzin verildi. Açık YouTube sekmelerini yenileyin.", "success");
+    } else {
+      showAccessMessage("İzin verilmedi. Eklentiler sayfasında eklentinin ayrıntılarındaki \"Site erişimi\" bölümünden de açabilirsiniz.", "error");
+      els.grantAccessBtn.disabled = false;
+    }
+  } catch (error) {
+    showAccessMessage(`İzin istenemedi: ${error?.message || error}`, "error");
+    els.grantAccessBtn.disabled = false;
+  }
 }
 
 // --- Model (applies to translations started after the change) ---
@@ -330,6 +373,7 @@ async function clearCache() {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
+  els.grantAccessBtn.addEventListener("click", requestAccess);
   els.saveBtn.addEventListener("click", saveKey);
   els.deleteBtn.addEventListener("click", deleteKey);
   els.toggleBtn.addEventListener("click", toggleVisibility);
@@ -353,6 +397,7 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   }
 
+  loadAccess();
   loadStatus();
   loadModel();
   loadCurrentVideo();

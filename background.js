@@ -125,9 +125,30 @@ class TranslationFormatError extends Error {
 // A queued request whose job has already failed; it is dropped without being sent.
 class JobStoppedError extends Error {}
 
+// The content scripts run on YouTube only while the browser grants the site. When the user
+// (or the browser) sets the extension's site access to "on click", nothing loads on a video
+// until the icon is clicked and the page reloaded. A "!" badge on the toolbar icon points to
+// the popup, which explains this and asks for the access.
+const YOUTUBE_ORIGIN = "https://www.youtube.com/*";
+const ACCESS_BADGE_COLOR = "#c4302b";
+
+async function updateAccessBadge() {
+  try {
+    const granted = await chrome.permissions.contains({ origins: [YOUTUBE_ORIGIN] });
+    await chrome.action.setBadgeText({ text: granted ? "" : "!" });
+    if (!granted) await chrome.action.setBadgeBackgroundColor({ color: ACCESS_BADGE_COLOR });
+  } catch (error) {
+    console.warn(`${LOG_PREFIX} Could not check YouTube access:`, error);
+  }
+}
+
 chrome.runtime.onInstalled.addListener((details) => {
   console.log(`${LOG_PREFIX} Extension ${details.reason} (v${chrome.runtime.getManifest().version})`);
+  updateAccessBadge();
 });
+chrome.runtime.onStartup.addListener(updateAccessBadge);
+chrome.permissions.onAdded.addListener(updateAccessBadge);
+chrome.permissions.onRemoved.addListener(updateAccessBadge);
 
 async function getModel() {
   const stored = (await chrome.storage.local.get(MODEL_KEY))[MODEL_KEY];

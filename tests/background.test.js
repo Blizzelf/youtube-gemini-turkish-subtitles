@@ -70,9 +70,12 @@ function makeGemini(behavior = () => null, { latencyMs = 5 } = {}) {
   return state;
 }
 
-function makeContext({ gemini, storage = makeStorage({ geminiApiKey: "AIzaTESTKEY" }), session = makeStorage(), cacheMaxBytes } = {}) {
+function makeContext({ gemini, storage = makeStorage({ geminiApiKey: "AIzaTESTKEY" }), session = makeStorage(), cacheMaxBytes, youtubeAccess = true } = {}) {
   const sent = [];
   const opened = [];
+  // Site access to YouTube (permissions.contains) and the toolbar badge it sets.
+  const access = { granted: youtubeAccess, badge: null, listeners: {} };
+  const event = (name) => ({ addListener(fn) { access.listeners[name] = fn; } });
   const ctx = {
     console: { log() {}, warn() {}, error() {} },
     setTimeout, clearTimeout, setInterval, clearInterval, URL, TextEncoder, structuredClone,
@@ -80,7 +83,8 @@ function makeContext({ gemini, storage = makeStorage({ geminiApiKey: "AIzaTESTKE
     chrome: {
       runtime: {
         id: "ext",
-        onInstalled: { addListener() {} },
+        onInstalled: event("onInstalled"),
+        onStartup: event("onStartup"),
         onMessage: { addListener(fn) { ctx.__listener = fn; } },
         getManifest: () => ({ version: "0.1.0" }),
         getPlatformInfo: async () => ({}),
@@ -91,13 +95,22 @@ function makeContext({ gemini, storage = makeStorage({ geminiApiKey: "AIzaTESTKE
         sendMessage: async (tabId, message) => { sent.push(JSON.parse(JSON.stringify(message))); },
         create: async ({ url }) => { opened.push(url); },
       },
+      permissions: {
+        contains: async ({ origins }) => access.granted && origins.every((o) => o === "https://www.youtube.com/*"),
+        onAdded: event("onAdded"),
+        onRemoved: event("onRemoved"),
+      },
+      action: {
+        setBadgeText: async ({ text }) => { access.badge = text; },
+        setBadgeBackgroundColor: async () => {},
+      },
     },
   };
   vm.createContext(ctx);
   vm.runInContext(patched({ cacheMaxBytes }), ctx);
   const send = (message, tabId = 7) =>
     new Promise((resolve) => ctx.__listener(message, { id: "ext", tab: { id: tabId }, frameId: 0 }, (r) => resolve(JSON.parse(JSON.stringify(r)))));
-  return { ctx, sent, opened, storage, session, send };
+  return { ctx, sent, opened, storage, session, send, access };
 }
 
 async function waitFor(predicate, timeoutMs = 3000) {
@@ -629,6 +642,24 @@ test("OPEN_SETTINGS opens the popup page in a tab", async () => {
   const { opened, send } = makeContext({ gemini: makeGemini() });
   assert.strictEqual((await send({ type: "OPEN_SETTINGS" })).ok, true);
   assert.deepStrictEqual(opened, ["chrome-extension://ext/popup.html?view=tab"]);
+});
+
+test("toolbar badge: \"!\" while YouTube access is withheld, cleared once granted", async () => {
+  const { access } = makeContext({ gemini: makeGemini(), youtubeAccess: false });
+  access.listeners.onStartup();
+  await waitFor(() => access.badge === "!");
+
+  access.granted = true;
+  access.listeners.onAdded({ origins: ["https://www.youtube.com/*"] });
+  await waitFor(() => access.badge === "");
+
+  access.granted = false;
+  access.listeners.onRemoved({ origins: ["https://www.youtube.com/*"] });
+  await waitFor(() => access.badge === "!");
+
+  const fresh = makeContext({ gemini: makeGemini() }).access;
+  fresh.listeners.onInstalled({ reason: "update" });
+  await waitFor(() => fresh.badge === "");
 });
 
 test("invalid data is rejected", async () => {

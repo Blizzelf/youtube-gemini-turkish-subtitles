@@ -46,6 +46,8 @@ A Chrome / Edge extension (Manifest V3) that translates YouTube captions into Tu
 
 Requires Chrome / Edge 111 or newer.
 
+If the logo button does not appear on videos, the browser's site access for the extension is probably set to **On click**, so it runs on YouTube only after you click its icon and reload the page. The toolbar icon then shows a red **!** badge. Click the icon (on a YouTube tab, accept the browser's reload prompt first), choose **YouTube'da her zaman çalışsın** in the popup and reload your YouTube tabs.
+
 ## Usage
 
 Open a YouTube video that has captions, click the extension's logo button at the right end of the control bar and turn on **Türkçe altyazı**. The button pulses while the translation is prepared, and Turkish subtitles appear as chunks finish. Use the same switch to hide or show them; while they are on, YouTube's own captions are hidden. If something fails before any subtitle appears (for example a missing API key), turn the switch on again to retry. **Altyazı ayarları** in the menu changes how the subtitles look.
@@ -128,3 +130,5 @@ YouTube altyazılarını Google Gemini ile Türkçeye çevirip videonun üstünd
    <img src="docs/images/popup.png" width="300" alt="API anahtarı, model ve önbellek ayarlarının olduğu popup">
 
 API anahtarınız yalnızca tarayıcınızda saklanır ve yalnızca Gemini API'sine gönderilir.
+
+Videolarda logo butonu çıkmıyorsa tarayıcıda eklentinin site erişimi büyük ihtimalle **Tıklandığında** ayarlıdır; eklenti YouTube'da ancak simgesine tıklayıp sayfayı yenileyince çalışır. Bu durumda araç çubuğundaki simgede kırmızı bir **!** görünür. Simgeye tıklayın (YouTube sekmesindeyseniz tarayıcının yenileme isteğini önce onaylayın), popup'ta **YouTube'da her zaman çalışsın**'ı seçin ve açık YouTube sekmelerini yenileyin.

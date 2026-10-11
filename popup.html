@@ -142,14 +142,39 @@
 
     .actions button { flex: 1; }
 
-    #saveBtn {
+    #saveBtn,
+    #grantAccessBtn {
       background: var(--accent);
       border-color: var(--accent);
       color: #fff;
       font-weight: 600;
     }
 
-    #saveBtn:hover { background: var(--accent-hover); }
+    #saveBtn:hover,
+    #grantAccessBtn:hover { background: var(--accent-hover); }
+
+    .access {
+      margin-bottom: 14px;
+      padding: 10px 12px;
+      border: 1px solid var(--error-text);
+      border-radius: 8px;
+      background: var(--error-bg);
+    }
+
+    .access strong {
+      display: block;
+      color: var(--error-text);
+      font-size: 13px;
+    }
+
+    .access p {
+      margin: 4px 0 8px;
+      font-size: 12px;
+    }
+
+    .access button { width: 100%; }
+
+    .access .message { min-height: 0; margin-top: 6px; }
 
     .message {
       min-height: 18px;
@@ -278,6 +303,13 @@
   <main class="card">
     <h1><img src="icons/icon-48.png" alt="">YouTube Çeviri</h1>
     <p class="subtitle">Çeviri için kendi Gemini API anahtarınızı girin. Anahtar yalnızca bu tarayıcıda saklanır.</p>
+
+    <section id="accessWarning" class="access" hidden>
+      <strong>YouTube erişimi kapalı</strong>
+      <p>Tarayıcı bu eklentiyi YouTube'da yalnızca simgesine tıklanınca çalıştırıyor, bu yüzden videolarda logo butonu çıkmıyor. İzin verdikten sonra açık YouTube sekmelerini yenileyin.</p>
+      <button id="grantAccessBtn" type="button">YouTube'da her zaman çalışsın</button>
+      <div id="accessMessage" class="message" aria-live="polite"></div>
+    </section>
 
     <span id="status" class="badge">Kontrol ediliyor…</span>
 
