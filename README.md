@@ -48,6 +48,8 @@ Requires Chrome / Edge 111 or newer.
 
 If the logo button does not appear on videos, the browser's site access for the extension is probably set to **On click**, so it runs on YouTube only after you click its icon and reload the page. The toolbar icon then shows a red **!** badge. Click the icon (on a YouTube tab, accept the browser's reload prompt first), choose **YouTube'da her zaman çalışsın** in the popup and reload your YouTube tabs.
 
+If the menu says **Eklentinin arka planı çalışmıyor**, the browser lost the extension's background service worker (seen in Edge). Click the extension icon, choose **Eklentiyi yeniden başlat** in the popup and reload your YouTube tabs. Your API key and saved translations are kept.
+
 ## Usage
 
 Open a YouTube video that has captions, click the extension's logo button at the right end of the control bar and turn on **Türkçe altyazı**. The button pulses while the translation is prepared, and Turkish subtitles appear as chunks finish. Use the same switch to hide or show them; while they are on, YouTube's own captions are hidden. If something fails before any subtitle appears (for example a missing API key), turn the switch on again to retry. **Altyazı ayarları** in the menu changes how the subtitles look.
@@ -132,3 +134,5 @@ YouTube altyazılarını Google Gemini ile Türkçeye çevirip videonun üstünd
 API anahtarınız yalnızca tarayıcınızda saklanır ve yalnızca Gemini API'sine gönderilir.
 
 Videolarda logo butonu çıkmıyorsa tarayıcıda eklentinin site erişimi büyük ihtimalle **Tıklandığında** ayarlıdır; eklenti YouTube'da ancak simgesine tıklayıp sayfayı yenileyince çalışır. Bu durumda araç çubuğundaki simgede kırmızı bir **!** görünür. Simgeye tıklayın (YouTube sekmesindeyseniz tarayıcının yenileme isteğini önce onaylayın), popup'ta **YouTube'da her zaman çalışsın**'ı seçin ve açık YouTube sekmelerini yenileyin.
+
+Menüde **Eklentinin arka planı çalışmıyor** yazıyorsa tarayıcı eklentinin arka plan kaydını kaybetmiştir (Edge'de görüldü). Eklenti simgesine tıklayın, popup'ta **Eklentiyi yeniden başlat**'ı seçin ve açık YouTube sekmelerini yenileyin. API anahtarınız ve kayıtlı çeviriler korunur.

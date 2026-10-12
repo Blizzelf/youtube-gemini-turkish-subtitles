@@ -143,7 +143,8 @@
     .actions button { flex: 1; }
 
     #saveBtn,
-    #grantAccessBtn {
+    #grantAccessBtn,
+    #restartBtn {
       background: var(--accent);
       border-color: var(--accent);
       color: #fff;
@@ -151,9 +152,10 @@
     }
 
     #saveBtn:hover,
-    #grantAccessBtn:hover { background: var(--accent-hover); }
+    #grantAccessBtn:hover,
+    #restartBtn:hover { background: var(--accent-hover); }
 
-    .access {
+    .alert {
       margin-bottom: 14px;
       padding: 10px 12px;
       border: 1px solid var(--error-text);
@@ -161,20 +163,20 @@
       background: var(--error-bg);
     }
 
-    .access strong {
+    .alert strong {
       display: block;
       color: var(--error-text);
       font-size: 13px;
     }
 
-    .access p {
+    .alert p {
       margin: 4px 0 8px;
       font-size: 12px;
     }
 
-    .access button { width: 100%; }
+    .alert button { width: 100%; }
 
-    .access .message { min-height: 0; margin-top: 6px; }
+    .alert .message { min-height: 0; margin-top: 6px; }
 
     .message {
       min-height: 18px;
@@ -304,7 +306,13 @@
     <h1><img src="icons/icon-48.png" alt="">YouTube Çeviri</h1>
     <p class="subtitle">Çeviri için kendi Gemini API anahtarınızı girin. Anahtar yalnızca bu tarayıcıda saklanır.</p>
 
-    <section id="accessWarning" class="access" hidden>
+    <section id="backgroundWarning" class="alert" hidden>
+      <strong>Eklentinin arka planı çalışmıyor</strong>
+      <p>Tarayıcı eklentinin arka plan kaydını kaybetmiş, bu yüzden çeviriler başlamıyor. Yeniden başlatınca API anahtarınız ve kayıtlı çeviriler korunur. Sonra açık YouTube sekmelerini yenileyin.</p>
+      <button id="restartBtn" type="button">Eklentiyi yeniden başlat</button>
+    </section>
+
+    <section id="accessWarning" class="alert" hidden>
       <strong>YouTube erişimi kapalı</strong>
       <p>Tarayıcı bu eklentiyi YouTube'da yalnızca simgesine tıklanınca çalıştırıyor, bu yüzden videolarda logo butonu çıkmıyor. İzin verdikten sonra açık YouTube sekmelerini yenileyin.</p>
       <button id="grantAccessBtn" type="button">YouTube'da her zaman çalışsın</button>

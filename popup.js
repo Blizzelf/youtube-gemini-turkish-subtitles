@@ -2,7 +2,8 @@
 // chrome.storage.local, re-translates the video open in the active tab (via its content script),
 // and shows, clears, exports and imports the translation cache (the cache belongs to
 // background.js; requested by message). When the browser withholds YouTube from the extension,
-// it shows a warning with a button that asks for the access.
+// it shows a warning with a button that asks for the access; when the background does not
+// answer at all, a warning with a button that restarts the extension.
 // The saved key is never written back into the input; only a masked form is shown.
 // All strings in this file are shown to the user, so they are Turkish.
 
@@ -12,12 +13,15 @@ const AUTO_TRANSLATE_KEY = "autoTranslate"; // Read by content.js; off by defaul
 const CLEAR_CONFIRM_MS = 4000; // How long the "Emin misiniz?" (are you sure?) state lasts
 const IMPORT_MAX_BYTES = 20 * 1024 * 1024;
 const YOUTUBE_ORIGIN = "https://www.youtube.com/*"; // The content scripts' match pattern
+const NO_BACKGROUND_PATTERN = /Receiving end does not exist/i;
 
 // Import happens in a tab: the popup can close when the file picker opens.
 const params = new URLSearchParams(location.search);
 const isTabView = params.get("view") === "tab";
 
 const els = {
+  backgroundWarning: document.getElementById("backgroundWarning"),
+  restartBtn: document.getElementById("restartBtn"),
   accessWarning: document.getElementById("accessWarning"),
   grantAccessBtn: document.getElementById("grantAccessBtn"),
   accessMessage: document.getElementById("accessMessage"),
@@ -161,6 +165,20 @@ async function requestAccess() {
   }
 }
 
+// --- Background that does not start ---
+// "Receiving end does not exist" from runtime.sendMessage means no service worker answers.
+// Seen in Edge after its Service Worker database was recreated empty: the browser still
+// believes the worker is registered and never starts it. Reloading the extension registers
+// it again; storage (key, cache, settings) is kept. The popup closes on reload.
+
+function checkBackgroundError(error) {
+  if (NO_BACKGROUND_PATTERN.test(String(error?.message || error))) els.backgroundWarning.hidden = false;
+}
+
+function restartExtension() {
+  chrome.runtime.reload();
+}
+
 // --- Model (applies to translations started after the change) ---
 
 async function loadModel() {
@@ -266,6 +284,7 @@ async function loadCacheStats() {
     els.clearCacheBtn.disabled = stats.count === 0;
     els.exportBtn.disabled = stats.count === 0;
   } catch (error) {
+    checkBackgroundError(error);
     els.cacheStats.textContent = "Bilgi alınamadı";
     els.clearCacheBtn.disabled = false;
     els.exportBtn.disabled = false;
@@ -373,6 +392,7 @@ async function clearCache() {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
+  els.restartBtn.addEventListener("click", restartExtension);
   els.grantAccessBtn.addEventListener("click", requestAccess);
   els.saveBtn.addEventListener("click", saveKey);
   els.deleteBtn.addEventListener("click", deleteKey);

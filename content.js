@@ -477,8 +477,19 @@
       showPartialTranslation(result, `Türkçe altyazı hazırlanıyor… (${response.done}/${response.total})`);
     } catch (error) {
       console.warn(`${LOG_PREFIX} Could not reach the background:`, error?.message || error);
-      if (isCurrent(result.videoId)) overlay.setStatus("error", "Eklentiye ulaşılamadı; sayfayı yenileyin.");
+      if (isCurrent(result.videoId)) overlay.setStatus("error", backgroundErrorText(error));
     }
+  }
+
+  // "Receiving end does not exist": the background service worker does not start. Seen in
+  // Edge after its Service Worker database was recreated empty; the browser still believes the
+  // worker is registered, and only reloading the extension (popup button) registers it again.
+  // Otherwise (e.g. "Extension context invalidated") the extension was reloaded and this
+  // content script is left over from the old instance.
+  function backgroundErrorText(error) {
+    return /Receiving end does not exist/i.test(String(error?.message || error))
+      ? "Eklentinin arka planı çalışmıyor; araç çubuğundaki simgeden yeniden başlatın."
+      : "Eklentiye ulaşılamadı; sayfayı yenileyin.";
   }
 
   // If the user seeks while translating, the chunk at that position moves to the front.
